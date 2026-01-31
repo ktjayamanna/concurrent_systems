@@ -1,0 +1,20 @@
+{
+    "name": "Concurrency",
+    "dockerFile": "../Dockerfile",
+    "workspaceMount": "source=${localWorkspaceFolder},target=/code,type=bind,consistency=cached",
+    "workspaceFolder": "/code",
+    "mounts": [
+        "source=${localEnv:HOME}/.ssh,target=/tmp/.ssh-host,type=bind,readonly"
+    ],
+    "postCreateCommand": "mkdir -p /root/.ssh && cp -r /tmp/.ssh-host/* /root/.ssh/ && chmod 700 /root/.ssh && chmod 600 /root/.ssh/* 2>/dev/null || true",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-vscode.cpptools",
+                "augment.vscode-augment",
+                "pomdtr.excalidraw-editor",
+                "ms-python.python"
+            ]
+        }
+    }
+}
