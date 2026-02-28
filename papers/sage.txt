@@ -1,0 +1,796 @@
+SAGE: Tool-Augmented LLM Task Solving Strategies
+in Scalable Multi-Agent Environments
+Robert K. Strehlow1,3∗, Tobias Küster1,3, Oskar F. Kupke1,3, Brandon
+Llanque Kurps1,3, Fikret Sivrikaya1,3, Sahin Albayrak1,2
+1Technische Universität Berlin (e-mail: first.second@tu-berlin.de)
+2DAI-Labor, TU Berlin, Chair of Agent Technologies (e-mail: first.second@dai-labor.de)
+3GT-ARC gGmbH (e-mail: first.second@gt-arc.com)
+*Corresponding author
+This paper is based on the research conducted in the GoKI project, funded by the German Federal Ministry
+of Labour and Social Affairs (BMAS) under the funding reference number DKI.00.00032.21. Furthermore, we
+acknowledge support by the German Research Foundation and the Open Access Publication Fund of TU Berlin.
+Abstract — Large language models (LLMs) mark services and results, are available as Open
+have proven to work well in question-answering sce- Source/Open Data on GitHub.
+narios, but real-world applications often require ac-
+cess to tools for live information or actuation. For
+this, LLMs can be extended with tools, which are 1 Introduction
+often defined in advance, also allowing for some
+fine-tuning for specific use cases. However, rapidly Although large-language models (LLMs) have
+evolving software landscapes and individual ser-
+vices require the constant development and inte- been proven to work reliably in a question-
+gration of new tools. answer scenario [9], many real-world applica-
+Domain- or company-specific tools can greatly el- tions require the usage of live knowledge and
+evate the usefulness of an LLM, but such custom telemetry. By extending LLMs with microser-
+tools can be problematic to integrate, or the LLM vices in the form of tools, responses can be
+may fail to reliably understand and use them. For
+this, we need strategies to define new tools and in- elevated by selected on-demand information.
+tegrate them into the LLM dynamically, as well as Tools are defined in advance and passed to
+robust and scalable zero-shot prompting methods the model upon inference, giving the LLM
+that can make use of those tools in an efficient man- the choice to formulate one or multiple tool
+ner. calls as a response instead of a natural lan-
+In this paper, we present “SAGE”, a specialized guage output. Specifically trained models, such
+conversational AI interface, based on the OPACA
+framework for tool discovery and execution. The as ToolLLaMA [11], which supports 16000+
+integration with OPACA makes it easy to add new real-world APIs from RapidAPI, can leverage
+tools or services for the LLM to use, while SAGE it- even multi-stage approaches to fulfill certain re-
+self presents rich extensibility and modularity. This quests. However, with rapidly evolving soft-
+not only provides the ability to seamlessly switch ware environments, growing knowledge bases,
+between different models (e.g. GPT, LLAMA), but
+also to add and select prompting methods, involv- and the call for individualized service architec-
+ing various setups of differently prompted agents for ture, strategies to include and integrate addi-
+selecting and executing tools and evaluating the re- tional tools have to be developed and able to
+sults. be used in an efficient way.
+We implemented a number of task-solving strate- Especially domain-specific applications of
+gies, making use of agentic concepts and prompting
+methods in various degrees of complexity, and eval- tools that are developed on-site or are embed-
+uated those against a comprehensive set of bench- ded in a company-internal infrastructure, for
+mark services. The results are promising and high- example mailing services, proprietary knowl-
+light the distinct strengths and weaknesses of dif- edge bases, or interactive office devices, can in-
+ferent task-solving strategies. Both SAGE and the crease the usability, as well as the receptivity
+OPACA framework, as well as the different bench- of LLM systems in modern work environments.
+1
+arXiv:2601.09750v1  [cs.SE]  12 Jan 2026
+The transformation of such services into LLM- 2 Background
+tools should be made understandable and ac-
+cessible, so a wide range of users are able to de- 2.1 The OPACA Multi-Agent
+velop their own LLM-tools, promoting further Framework
+integration of diverse services and knowledge An integral part of this work is the multi-
+basis into an LLM-pipeline alike. By lowering agent framework OPACA (Open, Language-
+the requirements of AI tool development, an and Platform-Independent API for Container-
+increase of AI technology in multiple industry ized Agents) [1], which manages and orches-
+fields could be realized as well. trates agents with modern agent-, container-,
+In this work, we present a system that au- and microservice technologies. It consists of
+tonomously chooses and calls tools to fulfill two main components:
+user requests. The key aspect of our system is
+its ability to generalize and dynamically access • Agent Containers (AC), encapsulating one
+and call available tools from an independent or more Agents, each providing different
+runtime platform, exposing tools as agent ser- Actions, which can be invoked by an ex-
+vices across a unified API. In addition, the sys- ternal event or through proactive, agentic
+tem is able to use different models in zero-shot behavior, and
+inference calls, accommodating a wide variety • Runtime Platform (RP), the core of the
+of application fields without overfitting a spe- framework, managing one or more Agent
+cific area. Relying on a uniform model integra- Containers through Docker or Kubernetes,
+tion, the deployment and usage of local mod- connecting with other runtime platforms
+els can also be supported through the vLLM and providing a user management system
+framework [5]. This approach directly enhances and token-based authentication.
+the development process and the availability
+of new LLM-tools in versatile service environ- Both components provide a REST API, used
+ments. for communication between the components
+Furthermore, we present different task- and with external services and users. The
+solving strategies, consisting of a variety of spe- available routes provide multiple services for
+cialized LLM inferences, dividing the response interaction with the deployed containers and
+generation process into smaller subtasks. Fi- their agents and to retrieve general information
+nally, we test our system and the implemented about the platform. An agent container typi-
+task-solving strategies with our own created cally holds one or more agents, providing a mul-
+benchmark set and tool evaluation method, titude of different services, or actions, which
+focusing on cross-domain response generation. can be called via the RP onto which the AC
+All of our code base1, as well as the benchmark has been deployed.
+containers2, are publicly available on GitHub. The OPACA framework makes it easy to
+The remainder of this paper is structured as develop and deploy new applications on a
+follows: We start by giving an overview of the running system and further provides seam-
+background (Section 2) and related work (Sec- less interaction with other applications on that
+tion 3). Afterwards, we describe the core con- or connected RPs. Applications running in
+cepts (Section 4) and architecture (Section 5) OPACA are self-descriptive, following com-
+of our framework. In Section 6 we describe dif- mon microservice guidelines. Supporting both
+ferent prompting methods implemented in the the OpenAPI standard and a more stream-
+system and present a systematic evaluation of lined proprietary format, each AC describes
+these methods, as well as the used LLMs, in its agents, those agents’ actions, their param-
+Section 7, before wrapping up in Section 8. eters and required data types, as well as op-
+tional natural-language descriptions of their
+purposes, using a combination of OpenAPI,
+1https://github.com/GT-ARC/opaca-llm-ui JSON Schema, and OPACA’s own JSON-based
+2https://github.com/RobertStrehlow/ models. These aspects make the OPACA
+opaca-llm-benchmark-containers framework well suited for dynamic, distributed,
+2
+and heterogeneous systems and facilitate access new model generation of various model fami-
+to those systems using an LLM. lies, such as the GPT series of OpenAI, Llama
+by Meta, Mistral, Gemini and others (cf. [8] for
+2.2 Agent Container Development a recent overview).
+Especially the composition of function calls
+The core of the OPACA framework, the have been explored early on to extend the ca-
+Runtime Platform, is publicly available on pabilities of LLMs beyond simple text genera-
+GitHub3, while the Agent Containers are in- tion tasks. One of such an approach is Tool-
+tended to be developed by users and later former [13], which has fine-tuned a pre-trained
+added to a running RP. A reference AC is im- GPT-J model with numerous exemplary API
+plemented with Kotlin using JIAC VI [12], but calls. The model was then able to formulate
+ACs can be developed in any programming lan- new API calls for novel user inputs in a for-
+guage, as long as they provide the API specified mat that can easily be translated to concrete
+by OPACA. In addition, a Python SDK has function calls, simplifying the downstream pro-
+been developed, streamlining the development cess of autonomously calling external functions.
+process for OPACA Agent Containers for ad- Other well-known systems, such as ReAct [18]
+vanced and novel users alike by providing high- enhanced such an approach by introducing rea-
+level functions and decorators that allow to ex- soning steps between function calls, enabling
+pose any function as an agent action or data the model to interpret function call results dur-
+stream. ing intermediate steps.
+Compared to similar protocols such as Function calling has since become an integral
+the Model Context Protocol (MCP) [3], the part of LLMs, broadening the scope of possible
+OPACA protocol extends the action/tool ex- integrations in real-world applications or as an
+posure with an agentic approach, binding tools embedded software component for tool orches-
+to specific agents and containers. Later, a cen- tration. Hence, the call for reliable benchmark
+tralized interaction point is handling all inter- sets measuring the effectiveness for models to
+action with available actions, in which a con- formulate function calls has become more nec-
+nected user does not need to be concerned with essary. Sets such as CallNavi [14] especially
+added, removed, updated, or deprecated agent deal with nested function calls, in which the
+containers, since the platform manager can eas- parameters first need to be retrieved by an ad-
+ily modify the platform during its runtime. ditional function call, which presents a chal-
+Due to its language-agnostic architecture lenge even for modern LLM to deal with hidden
+and the HTTP protocol used in the OPACA dependencies. Other approaches, such as API-
+framework, further AC implementations in Bank [6], emphasize the different steps, being
+other programming languages are possible and call, retrieval, and planning, each with the pos-
+have already been realized. This could fur- sibility of being evaluated by a tool-augmented
+ther allow for a faster adaption of the OPACA LLM.
+framework across multiple domains with differ- Advances have also been made to au-
+ent coding requirements. tonomously generate LLM conform function
+calls. Approaches such as ToolMaker [17] use
+LLM agents to generate function calls from
+3 Related Work open-source code bases. Reevaluating its own
+decision, the function call generation flow in
+Following the rapid adoption of AI technol- ToolReflection [10] reflects its own choice of
+ogy in recent years, numerous advances have API calls by using self-generated data, re-
+been made to enhance the general usability and trieved by the model’s and function call’s error
+integration possibility of large language mod- response.
+els. The basis for this were realized by the in-
+creased model performances, achieved by each Furthermore, the growing popularity of the
+Model Context Protocol (MCP) [3] closely re-
+3OPACA on GitHub: https://github.com/ sembles the core concept of the OPACA frame-
+GT-ARC/opaca-core work itself, although it focuses primarily on
+3
+function calling for LLMs. The fast and wide etc., by employing proxies such as vLLM
+adoption of it further showcases the strong or LiteLLM.
+need for a reliable function calling architecture,
+which is easily extendable and customizable. • Automatic Tool Calling: After the
+While MCP is mainly used in combination with used LLM generates the formal tool call,
+LLMs, the OPACA framework allows the cre- our system should automatically call the
+ation of a more agentic environment, in which chosen tool(s), receive the results from
+tools are mere agent actions and an LLM inte- the connected OPACA RP, and feed them
+gration is complementary to the overall design back to the LLM.
+structure. In this way, agents can still com- • Zero-Shot Prompting: The models
+municate with each other, leveraging their mi- used within the system should not be fine-
+croservice architecture advantages, enhancing tuned to accommodate a specific use-case.
+the built structure with an overarching LLM Tools are instead passed to the models at
+interaction. runtime, assuring the most up-to-date en-
+vironment.
+4 Concept • Self-Evaluating: The results of the tool
+Building upon the foundation laid out in the calls should be evaluated by the LLM in
+OPACA framework, we construct and develop the context of the current user request.
+an LLM-application interacting with the differ- Follow-up calls can be initiated with addi-
+ent ACs of OPACA via its RP. This interaction tional knowledge gained from the previous
+is simplified by the standardized API, allow- iteration.
+ing for quick service retrieval and invocation. • Resource-Efficiency: The tokens (and
+Further, it allows for the dynamic modifica- hence cost) and time it takes to gener-
+tion of services available to the LLM at any ate the final result should be analyzed and
+point, making the integration of this system evaluated. Both the time and the tokens
+into a new environment easy and straightfor- used for LLM calls should be minimized.
+ward. This opens up the possibility of the inte-
+gration of heterogeneous services into the tool- Note that due to the ambiguous meaning
+box of an LLM. of the term “agent”, in the following we will
+use the term ‘agent’ only for the agents within
+4.1 Design Goals the OPACA system, and the term ‘module’
+for what otherwise might be called an “LLM
+In this and the next section we present our agent”. Likewise, functions provided by the
+developed system “SAGE”, also known as OPACA agents are referred to as ‘actions’, but
+“OPACA-LLM”, whose prime functionality is to we will use the common term ‘tool’ once they
+answer and fulfill user requests with the help of have been transferred to the LLM world. A
+tools, provided as agent actions via the multi- ‘method’ consists of one or more specifically
+agent framework OPACA. We define the fol- prompted ‘modules’ (i.e., LLM agents) work-
+lowing design goals: ing together.
+• Extensibility: The system can be easily 4.2 Tool Call Generation Process
+extended with new (alternative or exper-
+imental) prompting methods, which are The general process of a request handled by
+composed of different LLM modules, with SAGE using tools can be divided into smaller
+different granularity and responsibilities. subtasks. This provides a first overview of the
+identified steps and a possible role division of
+• Model-Independence: The system and different modules within our system.
+the different methods implemented within
+it can be used with a variety of differ- • Planning: The model should choose the
+ent LLM, such as GPT, LLAMA, Mistral, most fitting tools from the available list
+4
+of tools, and generate a rough plan what
+steps have to be taken to reach the goal.
+• Construction: Given the information
+from the planning phase, the LLM con-
+structs a well-structured tool call, includ-
+ing the tool name and tool parameters us-
+ing the correct data types.
+• Evaluation: The results of the invoked Figure 1: SAGE System Architecture
+tool calls are analyzed against the initial
+user request to determine whether the re-
+trieved information can be used to fulfill
+the request or additional tool calls are re-
+quired.
+• Output Generation: All requested in-
+formation as well as the retrieval process
+are then summarized in the final response
+shown to the user.
+In addition to the above steps, performed
+by the LLM, the following steps are executed Figure 2: Screenshot of SAGE, showing
+by the surrounding system before and dur- ‘agents’ panel and empty chat window with ex-
+ing/after the LLM calls, respectively: ample prompts.
+• Acquisition: Retrieve and prepare agent
+actions from the connected OPACA RP
+into a well-defined tool-format.
+Additionally, a running OPACA RP is re-
+• Validation: Iterate over the constructed quired, to which the backend connects upon re-
+tool parameters and validate their data quest. While for the core functionality, only the
+types against the data types given within backend is required to run, the frontend sim-
+the OPACA agent action definitions, try plifies the interaction with SAGE immensely
+to perform a simple type casting if neces- by providing a clean and user-friendly inter-
+sary. face with an overview of different functional-
+• Calling: Given the information from the ities, which are used to send HTTP requests to
+selection phase, the tool/action gets called the backend. In the backend, these requests are
+via the standardized API of the OPACA handled by a REST API; an additional web-
+RP. The results are returned in a well- socket connection between frontend and back-
+defined format to the LLM. end also allows for streaming responses and in-
+termediate steps to the UI. The different routes
+provided by the backend can be used to send
+5 Architecture and receive an automated answer, change the
+method configuration, get information regard-
+The system architecture of SAGE consists of ing the agent actions and more. The back-
+two main components: end also includes multiple prompting methods
+• Frontend, developed with JavaScript using that implement different approaches to handle
+the Vue framework to create interactive UI user requests. All methods can then use mod-
+features, and els either hosted locally via vLLM or LiteLLM,
+or use externally hosted models, e.g., by Ope-
+• Backend, developed with Python using nAI. Figure 1 shows the overall architecture of
+FastAPI and providing a REST API to in- SAGE and its peripheral systems. A screenshot
+teract with its functionality. of the SAGE frontend can be seen in Figure 2.
+5
+configurations, and having individual chat his-
+tories.
+Additionally, ACs can define their own au-
+thentication routes, aligned with the OPACA
+framework specification for container logins. In
+the SAGE UI, any service requiring authentica-
+tion will prompt a secure login to the specific
+container. Once logged in, the AC can asso-
+ciate those credentials (or an accordingly con-
+figured client object) with the current user and
+automatically retrieve them for each of their
+future requests.
+Figure 3: Authentication to Runtime Platform 6 Different Methods for LLM
+and Agent Container Prompting
+SAGE employs different prompt processing
+5.1 Multi-Modality strategies, each focusing on different usabil-
+Besides basic text input and output, the fron- ity aspects such as correctness, answer quality,
+tend also provides interaction via voice, using and speed. In each method, one or multiple
+either the browser’s built-in TTS/STT support “LLM Modules” can be used for the final re-
+or an external voice server. Further, the UI al- sponse generation process. These modules use
+lows one to select one or more files, which are the OpenAI API, which has become a de-facto
+then sent to the backend and taken into account standard and can be used with the actual Ope-
+for the next LLM request, provided that the nAI endpoints or self-hosted open source LLM,
+selected model supports those files, e.g. PDF. using e.g. vLLM or LiteLLM as proxy. Within
+The LLM can then summarize those files or each method, multiple iterations might occur,
+use information found in the file as input for prompting each LLM module anew with gained
+later tool calls. External information sources information from the previous iteration. This
+can be included via respective OPACA actions: allows each method to follow a multi-stage so-
+at the moment, services for Google, Wikipedia, lution process as well as an evaluation proce-
+as well as e-mail, weather, and navigation APIs dure. All methods interact with the OPACA
+have been implemented and made available to platform for action retrieval and invocation.
+the LLM. The LLM’s response is rendered as • Simple/Simple-Tools: A single LLM mod-
+Markdown, so that e.g. images or tables can ule handling all tasks of the tool generation
+be embedded directly into the chat output, and process.
+further information can be referred to via hy-
+perlinks. • Tool-Chain: Two LLM modules splitting
+the generation and evaluation part.
+5.2 Security and Session Handling • Orchestration: A multi-stage process us-
+ing a divide & conquer approach, to divide
+The OPACA Framework provides basic au- the given request by the user into smaller
+thentication and user management functions, subtasks based on the agent composition
+which are also supported by the SAGE UI by of the connected OPACA RP.
+asking for matching credentials when connect-
+ing to a platform. The message exchange for There has been another implementation
+the authentication process between SAGE, the based on the architecture laid out by Song
+OPACA RP, and the AC is displayed in Fig- et al. [15], called “Rest-GPT”, in which four
+ure 3. SAGE further keeps track of multiple LLM modules were used for selecting, formu-
+sessions, allowing individual users to connect lating, calling, and evaluating tool calls, re-
+to different runtime platforms, using different spectively. Like the Simple method, it was
+6
+contain a valid tool call; in this case, the re-
+sponse is assumed to be the LLM’s final answer
+and sent back to the user.
+The Simple method is the only method in
+our system that does not use the function call-
+ing ability of modern models. On the one hand,
+this approach can support any model, since
+Figure 4: Overview of the Method Architec- only the basic query and response will be used.
+tures implementing the different modules of the However, relying on interpreting the response
+Tool Generation Process in 4.2 in their LLM as JSON can lead to premature cancellation of
+modules. (Red: Planning, Blue: Construc- the process (outputting the wrongly formatted
+tion, Green: Evaluation, Yellow: Output Gen- JSON to the user), especially if the model tends
+eration.) to include “chatter” along with the next action
+to take. In addition, the method is limited to
+performing a single tool call per iteration.
+not using the built-in tool calling feature of Despite its simplicity, this approach works
+modern models, relying solely on a combina- well, especially when used with strong models
+tion of thinking- and structured outputs. It has such as gpt-4o or gpt-4o-mini. The general
+since been deemed outdated since the currently response quality of this approach remains sim-
+implemented methods surpass its performance ple, with occasional outputs of attempted ac-
+while at the same time being easier to main- tion calls in malformed JSON formats. Still, in
+tain. most situations, the LLM is able to infer the
+Figure 4 shows an overview of the LLM mod- right actions to take, with the right parame-
+ules in the different methods and how they in- ters, and also correctly converts the output of
+teract with each other. In addition, Table 1 one action into the input for the next (e.g., from
+provides a comparison of the most relevant fea- a tuple of longitude and latitude to an object
+tures of the different methods. with those attributes).
+6.1 Simple 6.2 Simple-Tools
+The first method that was implemented utilizes The Simple-Tools method is a variant of the
+a single LLM module, fulfilling all the roles, Simple method: It also uses only a single LLM
+from tool generation, over tool call evaluation, module for all the roles, called in a loop, but in
+up to generating the final output. This module this approach, the integrated “tools” feature of
+is called repeatedly in a loop, feeding it back modern models is used to pass available tools to
+its previous responses along with the original the LLM and generate tool calls for user queries
+user query, until the request has been fulfilled within a special field of the LLM’s response,
+or the LLM decides that it cannot be fulfilled. performing a structural validation of the tool
+For this, the Simple method relies solely on call beforehand.
+the normal input and output generation of an For this, actions acquired from OPACA are
+LLM: Available tools are injected directly into converted into a well-defined format, under-
+its system prompt as a list of JSON objects, standable for most LLMs, including their name
+and likewise the LLM is instructed to output and description, a list of parameters, and defi-
+necessary tool calls one at a time in a specific nitions of expected parameter types, similar to
+JSON format in its regular chat response con- JSON Schema. This can easily be generated
+tent. It is checked whether the generated out- from OPACA’s OpenAPI specification.
+put conforms to the expected JSON schema of As in the Simple method, if a tool call
+a tool call, and if so, the corresponding OPACA is found in the response, the corresponding
+action is invoked with the specified parame- OPACA action is invoked and the result (or
+ters, and the result (or error) is appended to error) is added to the messages for the next it-
+the messages for the next iteration of the loop. eration of the loop, until the response does not
+This is repeated until the response does not include any more tool calls.
+7
+Method Format Parallel LLM Modules LLM Calls
+Simple JSON no 1 n+ 1
+Simple-Tools Tools no 1 n+ 1
+Tool-Chain Tools yes 2 2n
+Orchestrated Tools yes 3k + 4 3n+ 3
+Table 1: Comparison of the tool calling behavior of the different prompting methods: What
+format tools are provided in, tools can be executed in parallel, how many LLM modules exist,
+and how many LLM calls are executed. The parameter k stands for the number of agents on
+the OPACA Platform, and n for the number of (sequential) tools to be called.
+Unlike the Simple method, multiple tool calls multi-agent environment, providing numerous
+can be generated and executed in a single it- services, the Generator module can get over-
+eration of the loop, potentially reducing the loaded by the amount of available tools. The
+number of necessary LLM calls. Also, by mak- current maximum number of tools supported
+ing use of the native tools feature, the system by OpenAI models is 128, which limits the
+prompt can be significantly more simple, while amount of serviceable OPACA actions when us-
+at the same time achieving a more reliable tool ing this model family and is the reason, why
+generation. The downside, of course, is that any additional tools are currently cutoff. Fur-
+it only works with models that support tools, ther, a larger amount of available tools will
+which nowadays applies to most, but not all, also have an effect on the output quality of
+LLMs. Further, the maximum number of tools the Generator, since a large amount of input
+can be limited. tokens negatively affect the performance of an
+LLM [7].
+6.3 Tool-Chain
+Like Simple-Tools, the Tool-Chain method
+makes use of the built-in “tools” feature of mod- The overall response quality is very good, es-
+ern LLMs, but there are two different modules pecially since the Evaluator is tasked directly
+in this method: The first module, the “Gen- with the summarization of the internal chain,
+erator”, will choose and formulate tool calls making this method comprehensible and trans-
+based on the user input and currently avail- parent for users. Another special behavior of
+able information, while the second module, the the Evaluator is the missing system prompt
+"Evaluator", will summarize the result of these of this module and instead prompting solely
+tool calls, after they have been invoked via the with a user message, including the evaluation
+OPACA API. Additionally, the Evaluator will and summarization task as well as all the tool
+determine whether the achieved results are suf- calls made during this request. This has led
+ficient to deem the user query as fulfilled. If so, to an increase in performance for this module,
+the output of the second module will be sent as opposed to describing the task in the sys-
+back to the user. Otherwise, the first module tem prompt. However, with two LLM modules
+will receive the summary from the second mod- this method may increase the necessary time
+ule, continuing to output tool calls to fulfill the and token usage for an average call, especially
+user request. In the case where no tools are when compared against the simple method de-
+necessary, for example, if the user asks about scribed previously. Due to the usage of the inte-
+specific functionalities the LLM provides, the grated tool features, the Tool-Chain approach
+Generator will not generate any tool calls and does provide the possibility for parallel tool
+instead its answer will be directly forwarded to calls, eliminating the necessity for multiple iter-
+the user. ations, and thereby reducing the time for com-
+This method does have limitations, in parts plex user requests involving multiple, parallel
+defined by the used model. With a very large tool calls.
+8
+6.4 Orchestration Once all activated Agent-Trios are finished,
+their results are sent to the “Overall Evalu-
+As the number of tools grows, smaller open- ator”, which will compare the combined re-
+source models can struggle with function se- sults against the initial user request and will
+lection, while other models have a hard limit only output its reiteration decision. This is
+on the number of tools (e.g. 128 for OpenAI) done by providing the model with a guided
+they can handle. To address this challenge, the choice between the output values REITERATE
+Orchestration method defines a multi-stage ap- and FINISHED. In the case of reiteration, the
+proach, in which user requests are divided into module “Iteration Advisor” generates a detailed
+smaller subtasks, based on the agents deployed summary of the last iteration, the called tools
+on the connected RP. The initial user request and their results, a list of issues, and suggested
+will be passed to the first LLM module called improvements. It can further decline the re-
+“Orchestrator”. This module will have knowl- quest of a reiteration, if it finds its generated
+edge about all available agents on the con- output to be sufficient enough to answer the
+nected RP including their actions. However, user. The reiteration decision of the Iteration
+it does not have detailed information about ac- Advisor will be output lastly, using the autore-
+tions, such as the description and parameters, gressive behavior of LLMs [16] to make its de-
+which will reduce the overall overhead of the cision more robust. Finally, all information is
+initial input. This will also emphasize the im- passed to the Output Generator, which will for-
+portance of agent and action names, since the mulate the user response.
+Orchestrator has only those two information
+available for a further task breakdown. This method is significantly more complex
+As seen in Figure 4, the Orchestrator then than the other methods, which can be both
+sends its generated subtasks to one or more so- a strength and a weakness. By subdividing
+called “Agent-Trios”, which mirror the available the tools across different Agent-Trios, each of
+agents on the connected RP and are therefore those calls can be faster and more reliable, but
+initialized dynamically. Each Agent-Trio con- the orchestration can have problems if differ-
+sists of three LLM modules: ent Agent-Trios have similar capabilities, or if
+tasks require much interaction between differ-
+1. Planner: Selects the next tool(s) to call ent Agent-Trios. The use of a dedicated output
+generator module requires an additional LLM
+2. Worker: Formulates the specific tool calls call, but allows for streaming of the final re-
+sponse, since it splits the evaluation and re-
+3. Evaluator: Evaluates the results sent sponse generation step.
+back by the OPACA platform Another key feature of this architecture
+is its ability to employ different LLMs for
+The overall functionality of it can be com- different pipeline stages. In our imple-
+pared to the Tool-Chain approach from the pre- mentation, we achieved comparable perfor-
+vious section, while further splitting the tool mance to GPT-4o using a combination of
+generation part into a Planner and Worker Mistral-Small-24B-Instruct-2501 (for output
+module. The Planner receives a subtask from generation and worker) and Qwen2.5-32B-
+the Orchestrator, which potentially still needs Instruct-GPTQ-Int4 (for planning and evalu-
+further breakdown into concrete tool calls. The ation tasks). This model configuration will be
+Worker then receives the selected tool choices called “open-source-composition” in the follow-
+by the Planner in natural language and gener- ing sections. In particular, our experiments re-
+ates concrete tool calls from them, using the vealed that while model quantization generally
+tools output field. Afterwards, the correspond- preserves most capabilities, as suggested in lit-
+ing OPACA actions are invoked. The results erature [4], it significantly affects the accuracy
+are evaluated by the Evaluator against the ini- of tool call generation. This makes quantized
+tial task sent by the Orchestrator to this Agent- models unsuitable for worker roles despite their
+Trio; if the acquired results satisfy the request, viability in other pipeline stages. In our tests,
+the Agent-Trio is marked as finished. we used a 4-bit GPTQ [2] quantization for all
+9
+models except a full 16-bit LLM for the Worker information dependencies gained from sequen-
+module. tial tool calls. All prompts have been fur-
+ther extended with an expected answer and ex-
+pected tool calls. The expected answer will be
+7 Evaluation used as a reference for the evaluation with a
+Performing an in-depth analysis of our con- judge-LLM. The expected tools follow a strict
+structed system represents a major challenge format and include parameter types and values
+for a comparable evaluation method. This is for a more definite comparison of the internal
+due to the unique integration of the OPACA execution chain of SAGE and the expected be-
+framework and the interaction with tools in havior.
+the form of OPACA actions. This requires a
+testing environment to be available as OPACA 7.2 Metrics
+agent containers. Unfortunately, the availabil-
+ity of public ACs is very limited and existing During a benchmark test, several metrics are
+containers are not meant for evaluation pur- captured to evaluate the overall performance
+poses, including actions with varying execution of our system and our implemented methods.
+times. Hence, we have constructed specifically Each request captures information about tool
+designed ACs, implementing services that sim- calls, token usage, time per LLM module, and
+ulate real-world scenarios. Further, extensive how many internal iterations were necessary to
+benchmark prompts have been developed, ac- formulate the final result. These results are
+commodating the available functions by mak- then consolidated and form the overall met-
+ing concrete inputs to our system, expecting a rics for a benchmark run of a certain prompt-
+pre-defined result. ing method. An overview of these summarized
+metrics is given in the following:
+7.1 Data Preparation • Response Score: Value between 1 and
+In total, 3 ACs have been constructed, hold- 5. Average score of each request during
+ing 15 agents with a total of 102 actions, pro- the benchmark run. The score is given by
+viding functionalities in the field of smart- the Judge-LLM by evaluating the expected
+office, warehouse-management, and music- answer (curated by a human) against the
+player/playlist-management. The containers actual answer of SAGE. Does not consider
+have no real-world effect, but maintain state the called tools.
+changes, such as the addition or removal of cus-
+tomer orders from the warehouse-management • Correct Tool Usage: Number of re-
+container. The complexity of the agents range quests that have called all expected tools.
+from simple getter-functions to complex object
+creations with custom data types. A more de- • Perfect Tool Usage: Number of requests
+tailed description of the containers, agents, and that have called all expected tools and no
+actions, can be found in the public GitHub additional tools.
+repository containing the benchmark agents.4 • Time: Total time of the benchmark run.
+The benchmark prompts have all been man-
+ually curated and annotated. Overall, we split • Module Time: A breakdown of the time
+the prompts into a Single-Tool and Multi-Tool each LLM module has spent as part of the
+scenario, which indicates the amount of neces- answer generation process for each request.
+sary tool calls a prompt will result in. Prompts
+from the Single-Tool set will only require one • Token Usage: Total number of tokens
+tool to be called, while the Multi-Tool set will used.
+always require at least two tool calls to be
+made, either being executed in parallel or with To extract these metrics from our bench-
+4https://github.com/RobertStrehlow/ mark tests, the following components were im-
+opaca-llm-benchmark-containers plemented:
+10
+7.2.1 Response Score: Judge-LLM as “Do A and then B”, only for the inter-
+nal chain to execute B right away with cor-
+Each request includes an expected answer, in- rectly guessed parameters.
+dicating what information or contents should
+be present in the answer. This allows for a 3. Alternatives: Certain tool calls will pro-
+broader range of accepted answers, differing in vide the same information. Since our sys-
+style and expression. For this, a judge-LLM is tem is primarily focused on fulfilling re-
+tasked to compare the expected answer to the quests for a user, we allow for alternative
+actual output of each request. The judge-LLM calls for specific tools. The metric Perfect
+is provided with the original request for context Tool Usage will then be considered valid,
+and instructions to rate answers on a 1-5 scor- if only one of the grouped alternatives has
+ing system, as well as to provide a reason for its been called.
+decision, which can help to manually validate
+its decision afterwards, if necessary. As a judge, 4. Optionality: Some tools or parameters
+we will use the gpt-4.1-2025-04-14 model snap- can be optionally included, but their pres-
+shot by OpenAI. For details on how the Judge ence or absence should not alter the valida-
+LLM is prompted and the provided descrip- tion of a tool call if they are not influencing
+tions of each grading scale, please refer to the the overall result.
+test code in the public repository.5
+By applying these attributes to the tool
+7.2.2 Tool Checking checking part in the benchmark script, the val-
+idation of correct tool calls is further strength-
+Each request in both benchmark sets (Single- ened by additional insights. This is important
+Tool & Multi-Tool) specifies their expected to showcase an additional metric, besides the
+tools. This is done by manually curating the response score given by the Judge-LLM, which
+name and expected parameters for each tool in is not fully deterministic and may include a cer-
+each test case. However, these two values were tain bias in its automatic evaluation [19].
+not enough for a proper evaluation, since more
+sophisticated requests required a better distinc- 7.2.3 Resource Monitoring
+tion for certain situations. Therefore, the fol-
+lowing attributes were further included in our SAGE automatically keeps track of the num-
+tool checking: ber of internal iterations, completion- and
+response-tokens and execution time for each re-
+1. String Strictness: Some of our simu- quest and stores them along the final response.
+lated services would give specific ids per- It also breaks down the time it took each mod-
+taining to a specific name or composition ule to output text or a tool call. The LLM
+of names. To mimic the correct behavior of module of a specific method time might not
+these implemented tools, string matching add up to the overall time, since the tool call-
+can be set to either EXACT, PARTIAL, ing step done by the system itself is not in-
+or NONE. If an expected tool call would cluded in those times. For the methods Sim-
+then define a PARTIAL string parameter ple/Simple-Tools, such a breakdown is unneces-
+as “server”, an actual tool call with the sary, since only one LLM module is used. These
+used parameter “Server Room” would still metrics are then extracted and aggregated by
+be labeled as correct. the benchmark script.
+2. Dependencies: Regarding the Multi-
+Tool benchmark set, some tools are de- 7.3 Benchmark Results
+pendent on previous tools and should only We have conducted multiple tests, using the
+be labeled as correct if the previous call aforementioned ACs and benchmark prompts.
+has been made. This should avoid situa- In this section, we will present the gathered re-
+tions in which the request was formulated sults, comparing our implemented methods and
+5https://github.com/GT-ARC/opaca-llm-ui/ showcase the effectiveness of our constructed
+blob/main/tests/test.py system. Further, a discussion and evaluation
+11
+(a) Correct and Perfect Tool Calls percentage (b) Correct and Perfect Tool Calls percentage
+achieved during the Single- and Multi-Tools achieved during the Single- and Multi-Tools
+benchmark runs. All LLM modules in all methods benchmark runs. The Orchestration method uses the
+were using the gpt-4o-mini-2024-07-18 model. OSC (see Section 6.4). All remaining methods used
+only the Mistral-Small-24B-Instruct-2501 model for
+their LLM modules.
+Figure 5: Comparison of tool usage across different benchmark types.
+of the achieved results will be made, reflecting Method Score (1–5) Time (s) Tokens
+on the set goals and translation ability of our (Mio.)
+system into other scenarios. The complete re- Simple 4.52 / 3.81 2.36 / 6.14 3.478
+sults files are available on the project’s GitHub Simple- 4.68 / 4.20 5.24 / 8.45 3.120
+page6. Tools
+Tool- 4.72 / 4.00 6.81 / 9.99 3.036
+Chain
+7.3.1 Final Response Score and Effi- Orches- 4.16 / 3.71 14.26 / 16.98 2.557
+ciency Metrics tration
+For better comparability, the results in Ta- Table 2: Method comparison
+ble 2 are taken from tests using the same model
+across all methods. The Judge-LLM uses the
+same model for all comparisons (gpt-4.1-2025- taking the longest as well, however, its token
+04-14 ). Every given score for a single gener- usage is the lowest overall.
+ated output of a request also includes a reason, With the method’s architectures in mind,
+making the assessment of the Judge-LLM un- these results were expected to an extend. The
+derstandable for a human. The scores range Simple method only uses a single LLM modules
+from 1.0, being the worst possible score, to 5.0, while also generating function calls in a JSON
+being the best possible score. schema in its normal output, resulting subse-
+The remaining metrics in Table 2, Time and quently in a very low time for the benchmark
+total Token usage, are accumulated for each test. The high number of tokens can also be
+prompt given to the system using the specified explained by the fact, that the Simple method
+method. This is possible since the benchmark is the only method unable to formulate multi-
+prompts are the same for every method test. ple function calls in a single LLM inference. For
+Each method exceeds in a different area for this reason, it is further the only method to not
+the three metrics. While the Simple method set a limit for internal iterations, only stopping
+uses the most tokens, it also takes the least if no valid JSON format was being output, as
+amount of time by a large margin. The Simple- described in Section 6.1.
+Tools and Tool-Chain methods are relatively The Simple-Tools and Tool-Chain methods
+close in all areas, but will show distinctive char- are very comparable regarding the metrics in
+acteristics in the tool usage comparison. The Table 2. Their inner structure only differs
+Orchestration method performs the worst while from an additional LLM-component in the
+6https://github.com/GT-ARC/opaca-llm-ui/ Tool-Chain method, which is encapsulated in
+tree/main/tests/benchmark_results the single LLM modules of the Simple-Tools
+12
+method.
+The Orchestration is a special case, since it
+raises the minimum used LLM modules to six
+per request, but performs overall the worst and
+slowest of all methods. However, its redeem-
+ing quality is the low number of used tokens,
+since it follows a hierarchical approach of avail- (a) gpt-4o-mini-2024-07-18
+able functions, in which each function is only
+accessible by its agent, which itself is only pro-
+vided to the orchestrator module with a general
+description. The strategy closely resembles a
+divide & conquer approach, minimizing espe-
+cially the input tokens for an LLM-call.
+(b) Open-Source
+7.3.2 Tool Selection Composition
+We now compare the valid tool calling ability of Figure 6: LLM modules time distribution of
+our methods and further compare this ability the Orchestration method with two models for
+between our proprietary used model (gpt-4o- each benchmark prompting set. The colors cor-
+mini-2024-07-18 ) and the open source models respond to the following LLM modules (Yel-
+described especially in Section 6.4. The Mistral low: Orchestrator, Orange: Planner, Brown:
+and Qwen model series were chosen in particu- Worker, Green: OverallEvaluator, Blue: Out-
+lar, due to their wide range of available models putGenerator, Red: IterationAdvisor).
+and comparability to the GPT series of Ope-
+nAI.
+Unlike the Judge-LLM response score, both method that has better or equal results while
+the Simple-Tools and Tool-Chain excel in their using open-source models, although only in the
+tool formulating capability in both prompting Multi-Tool scenario by a very small margin.
+scenarios against the other methods. The most
+noticeable difference between those two meth- 7.3.3 Resource Efficiency
+ods is the ability of the Tool-Chain method
+to formulate the correct tool call on the The ability to use given resources efficiently,
+first attempt more often than the Simple-Tool especially in regard to computational needs,
+method, resulting in more relative Perfect Tool is crucial for an effective tool call genera-
+Usage results. tion strategy. To measure these metrics, each
+The Simple method especially struggles with benchmark test additionally captures the ex-
+the open-source model, most likely due to the ecution time provided by each implemented
+custom schema that is necessary to lead to cor- model itself and additionally provides the dis-
+rect tool calls. This theory is supported by tribution of the time for each LLM module
+the correct tool formulation in other methods, within the selected method. For the Sim-
+which use the “tool_call” output field of an ple/Simple-Tools method, this distribution is
+LLM inference. However, the Simple is very not given, since the total time corresponds
+strongly influenced by the used model, since to the only LLM module used within these
+models that tend to output a lot of “chatter” methods. The distribution for the Tool-Chain
+alongside its JSON schema output will also method is for all configurations very balanced
+lead to a preemptive cancellation of the internal between the Generator and Evaluator mod-
+chain, before the final answer could be reached. ules, with a roughly 50%-50% distribution be-
+The Orchestration method present the steep- tween them. However, a larger variance can be
+est relative drop from Correct Tool Usage to observed for the Orchestration method, show-
+Perfect Tool Usage, indicating a lot of un- ing a clear difference between the two tested
+necessary tool call formulation during the re- model configurations as well as the two differ-
+sponse generation. However, it is also the only ent prompting scenarios.
+13
+In Figure 6, the results of the two bench- ronment is minimally invasive, while also pro-
+marking prompts have been averaged. For all viding all advantages of an agentic microservice
+benchmark tests of the Orchestration method, architecture.
+the Worker is playing a crucial role in the The implemented methods have demon-
+tool call generation process, by deciding what strated different strengths in various categories,
+tools need to be called next for the given sub- important for the inference of LLMs, especially
+task, showcased by its disproportional portion while formulating tool calls, such as valid tool
+size in the overall time consumption of this formulation, response time, token usage, or an
+method. Comparing the two used models with automated response score given by a judge-
+their previous tool call construction rate in LLM. The ability to use multiple models, pro-
+mind, the open-source composition is using the prietary and open-source alike, is another ad-
+Orchestrator as well as the IterationAdvsisor vantage of our implemented system, making
+more dominant. This is most likely due to the adaption of newly released models, such as
+the amount of corrections the internal chain GPT-5, easy and without much effort.
+of LLM modules have to apply, resulting in a However, even with more advanced models,
+new invocation of the Orchestrator, which, in intelligent, multi-stage knowledge-flows have
+an ideal tool planning phase, should have only a huge potential in complex service environ-
+been invoked once. The IterationAdvisor is also ments. Especially the inclusion of OPACA’s
+only called if the OverallEvaluator has decided abstraction layers of Agent Containers, Agents,
+that a reiteration is necessary. Clearly, the and Actions can help to reduce the overhead
+open-source composition struggles with finding produced by available tool call definitions. This
+the right tool calls on the first attempt, which way, a larger amount of tool calls can be sup-
+is further showcased in Figure 5 indicating a ported by a single LLM-system without reduc-
+large portion of tool calls were not “perfect”, ing the overall performance, by leveraging core
+but rather just correct after numerous attempts concepts of multi-agent technologies.
+of the internal chain.
+Overall, the implemented methods have
+shown the reliable tool calling performance of 8.1 Outlook
+the system, with different strengths regard-
+ing the presented metrics. Consequently, each Besides constantly working on and improving
+method has a different use-case in which it can the different prompting methods, their reliabil-
+outperform the other methods, although for ity and performance, we are currently investi-
+general tasks, the Simple-Tools and Tool-Chain gating ways to include more ‘proactive’ and ‘in-
+method could be preferred, since their overall trospective’ functionalities into SAGE. Those
+tool calling ability is a good choice for basic would, e.g., allow the system not only to adapt
+tasks with a relatively fast response time. and re-configure itself based on the users’ in-
+structions or (inferred) preferences, but also to
+8 Conclusion schedule and manage tasks for (regular) exe-
+cution at a later time. Those and similar ad-
+ditions will enhance SAGE’s capability to sup-
+In this work, we have presented, analyzed, port improved productivity in daily work.
+and proved the effectiveness of our constructed
+LLM-based methods in zero-shot inferences,
+formulating tool calls provided by the OPACA
+framework as agent actions and calling them Acknowledgments
+over the OPACA RP. Our system “SAGE” is
+further extendable, making it a solid choice We want to thank the entire development team
+for scalable environments, while also introduc- of SAGE and OPACA, former and current, not
+ing authentication and user-management to the all of whom were able to contribute to this arti-
+connected multi-agent-system and individual cle, in particular Cedric Braun, Daniel Wetzel,
+agent container. The adoption of the OPACA Tolga Akar, Benjamin Acar, and Abdullah Ki-
+framework in an already existing software envi- wan.
+14
+References Muhammad Usman, Naveed Akhtar, Nick
+Barnes, and Ajmal Mian. A comprehen-
+[1] Benjamin Acar, Tobias Küster, Oskar F. sive overview of large language models,
+Kupke, Robert K. Strehlow, Marc Guer- 2024.
+reiro Augusto, Fikret Sivrikaya, and Sahin
+Albayrak. OPACA: Toward an open, [9] Long Ouyang, Jeffrey Wu, Xu Jiang,
+language- and platform-independent API Diogo Almeida, Carroll Wainwright,
+for containerized agents. IEEE Access, Pamela Mishkin, Chong Zhang, Sandhini
+12:10012–10022, 2024. Agarwal, Katarina Slama, Alex Ray,
+et al. Training language models to follow
+[2] Elias Frantar, Saleh Ashkboos, Torsten instructions with human feedback. Ad-
+Hoefler, and Dan Alistarh. Gptq: Ac- vances in neural information processing
+curate post-training quantization for gen- systems, 35:27730–27744, 2022.
+erative pre-trained transformers. arXiv
+preprint arXiv:2210.17323, 2022. [10] Gregory Polyakov, Ilseyar Alimova,
+Dmitry Abulkhanov, Ivan Sedykh, An-
+[3] Xinyi Hou, Yanjie Zhao, Shenao Wang, drey Bout, Sergey Nikolenko, and Irina
+and Haoyu Wang. Model context protocol Piontkovskaya. Toolreflection: Improving
+(mcp): Landscape, security threats, and large language models for real-world api
+future research directions. arXiv preprint calls with self-generated data. In Proceed-
+arXiv:2503.23278, 2025. ings of the 1st Workshop for Research on
+[4] Wei Huang, Xingyu Zheng, Xudong Ma, Agent Language Models (REALM 2025),
+Haotong Qin, Chengtao Lv, Hong Chen, pages 184–199, 2025.
+Jie Luo, Xiaojuan Qi, Xianglong Liu, and [11] Yujia Qin, Shihao Liang, Yining Ye, Kun-
+Michele Magno. An empirical study of lun Zhu, Lan Yan, Yaxi Lu, Yankai Lin,
+LLaMA3 quantization: from LLMs to Xin Cong, Xiangru Tang, Bill Qian, Si-
+MLLMs. Visual Intelligence, 2(1), Decem- han Zhao, Runchu Tian, Ruobing Xie, Jie
+ber 2024. Zhou, Mark Gerstein, Dahai Li, Zhiyuan
+[5] Woosuk Kwon, Zhuohan Li, Siyuan Liu, and Maosong Sun. Toolllm: Fa-
+Zhuang, Ying Sheng, Lianmin Zheng, cilitating large language models to mas-
+Cody Hao Yu, Joseph E. Gonzalez, Hao ter 16000+ real-world apis. CoRR,
+Zhang, and Ion Stoica. Efficient mem- abs/2307.16789, 2023.
+ory management for large language model [12] Christian Rakow. A framework for sim-
+serving with pagedattention. In Proceed- ulating mobility services in large scale
+ings of the ACM SIGOPS 29th Symposium agent-based transportation systems. In
+on Operating Systems Principles, 2023. Proceedings of the 2019 Summer Simu-
+[6] Minghao Li, Yingxiu Zhao, Bowen Yu, lation Conference, SummerSim ’19, San
+Feifan Song, Hangyu Li, Haiyang Yu, Diego, CA, USA, 2019. Society for Com-
+Zhoujun Li, Fei Huang, and Yongbin Li. puter Simulation International.
+Api-bank: A comprehensive benchmark
+for tool-augmented llms. arXiv preprint [13] Timo Schick, Jane Dwivedi-Yu, Roberto
+arXiv:2304.08244, 2023. Dessì, Roberta Raileanu, Maria Lomeli,
+Luke Zettlemoyer, Nicola Cancedda, and
+[7] Nelson F Liu, Kevin Lin, John He- Thomas Scialom. Toolformer: Language
+witt, Ashwin Paranjape, Michele Bevilac- models can teach themselves to use tools,
+qua, Fabio Petroni, and Percy Liang. 2023.
+Lost in the middle: How language mod-
+els use long contexts. arXiv preprint [14] Yewei Song, Xunzhu Tang, Cedric
+arXiv:2307.03172, 2023. Lothritz, Saad Ezzini, Jacques Klein,
+Tegawendé F Bissyandé, Andrey Boytsov,
+[8] Humza Naveed, Asad Ullah Khan, Shi Ulrick Ble, and Anne Goujon. Callnavi,
+Qiu, Muhammad Saqib, Saeed Anwar, a challenge and empirical study on llm
+15
+function calling and routing. arXiv
+preprint arXiv:2501.05255, 2025.
+[15] Yifan Song, Weimin Xiong, Dawei Zhu,
+Wenhao Wu, Han Qian, Mingbo Song,
+Hailiang Huang, Cheng Li, Ke Wang,
+Rong Yao, et al. RestGPT: Connect-
+ing large language models with real-
+world restful APIs. arXiv preprint
+arXiv:2306.06624, 2023.
+[16] Ashish Vaswani, Noam Shazeer, Niki
+Parmar, Jakob Uszkoreit, Llion Jones,
+Aidan N Gomez, Łukasz Kaiser, and Il-
+lia Polosukhin. Attention is all you need.
+Advances in neural information processing
+systems, 30, 2017.
+[17] Georg Wölflein, Dyke Ferber, Daniel
+Truhn, Ognjen Arandjelović, and
+Jakob Nikolas Kather. Llm agents
+making agent tools. arXiv preprint
+arXiv:2502.11705, 2025.
+[18] Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan
+Du, Izhak Shafran, Karthik Narasimhan,
+and Yuan Cao. React: Synergizing reason-
+ing and acting in language models. In In-
+ternational Conference on Learning Rep-
+resentations (ICLR), 2023.
+[19] Jiayi Ye, Yanbo Wang, Yue Huang, Dong-
+ping Chen, Qihui Zhang, Nuno Moniz,
+Tian Gao, Werner Geyer, Chao Huang,
+Pin-Yu Chen, Nitesh V Chawla, and Xian-
+gliang Zhang. Justice or prejudice? quan-
+tifying biases in llm-as-a-judge, 2024.
+16
