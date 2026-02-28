@@ -1,12 +1,20 @@
 {
-    "name": "Concurrency",
+    "name": "Speculative Engine",
     "dockerFile": "../Dockerfile",
     "workspaceMount": "source=${localWorkspaceFolder},target=/code,type=bind,consistency=cached",
     "workspaceFolder": "/code",
     "mounts": [
-        "source=${localEnv:HOME}/.ssh,target=/tmp/.ssh-host,type=bind,readonly"
+        "source=${localEnv:HOME}/.ssh,target=/tmp/.ssh-host,type=bind,readonly",
+        "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
     ],
     "postCreateCommand": "mkdir -p /root/.ssh && cp -r /tmp/.ssh-host/* /root/.ssh/ && chmod 700 /root/.ssh && chmod 600 /root/.ssh/* 2>/dev/null || true",
+    "features": {
+        "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+            "version": "29.2.1",
+            "moby": false,
+            "dockerDashComposeVersion": "v5.0.2"
+        }
+    },
     "customizations": {
         "vscode": {
             "extensions": [
