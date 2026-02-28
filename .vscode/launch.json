@@ -6,16 +6,18 @@
       "type": "node",
       "request": "launch",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
+      "runtimeArgs": [
+        "run",
+        "dev"
+      ],
       "cwd": "${workspaceFolder}/src/Frontend",
       "console": "integratedTerminal",
       "preLaunchTask": "start-all-services",
       "serverReadyAction": {
-        "pattern": "Local:.*http://localhost:([0-9]+)",
-        "uriFormat": "http://localhost:%s",
+        "pattern": "Local:.*http://localhost:5173",
+        "uriFormat": "http://localhost:5173",
         "action": "openExternally"
       }
     }
   ]
 }
-
