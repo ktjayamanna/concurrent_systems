@@ -11,6 +11,9 @@
         "dev"
       ],
       "cwd": "${workspaceFolder}/src/Frontend",
+      "env": {
+        "VITE_PLATFORM_BASE_URL": "http://172.17.0.1:8000"
+      },
       "console": "integratedTerminal",
       "preLaunchTask": "start-all-services",
       "serverReadyAction": {

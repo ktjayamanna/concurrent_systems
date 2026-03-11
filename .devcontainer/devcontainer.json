@@ -21,7 +21,9 @@
                 "ms-vscode.cpptools",
                 "augment.vscode-augment",
                 "pomdtr.excalidraw-editor",
-                "ms-python.python"
+                "ms-python.python",
+                "anthropic.claude-code",
+                "openai.chatgpt"
             ]
         }
     }

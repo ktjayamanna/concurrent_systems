@@ -15,7 +15,7 @@
     {
       "label": "docker-compose-up",
       "type": "shell",
-      "command": "docker compose up --build -d backend session-db",
+      "command": "docker compose --profile platform up --build -d backend session-db platform",
       "options": {
         "cwd": "${workspaceFolder}/src"
       },

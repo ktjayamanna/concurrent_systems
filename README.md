@@ -22,7 +22,7 @@
 2. Press `F5` or select **"run-sage"** from the Run and Debug panel
 
 This automatically:
-- Starts Docker services (DB + backend container)
+- Starts Docker services (DB + backend container + OPACA platform)
 - Installs dependencies if needed
 - Runs backend server (port 3001)
 - Runs frontend dev server (port 5173)

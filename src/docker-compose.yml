@@ -71,7 +71,7 @@ services:
       - "8000:8000"
     environment:
       PORT: 8000
-      PUBLIC_URL:
+      PUBLIC_URL: http://localhost:8000
       PLATFORM_ENVIRONMENT: DOCKER
       ENABLE_AUTH: false
       DB_EMBED: true
