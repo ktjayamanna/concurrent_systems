@@ -3,14 +3,23 @@ import json
 import subprocess
 import sys
 import time
+from pathlib import Path
 from urllib import error, request
 
 
+SAFE_BENCHMARK_API_PORT = 28082
 BENCHMARK_CONTAINERS = [
+    "smart-office",
+    "warehouse",
+    "music-platform",
+]
+LEGACY_BENCHMARK_CONTAINERS = [
     "rkader2811/smart-office",
     "rkader2811/warehouse",
     "rkader2811/music-platform",
 ]
+BUILD_SCRIPT = Path(__file__).resolve().parents[2] / "opaca-llm-benchmark-containers" / "scripts" / "build_containers.py"
+BUILD_SCRIPT_CWD = BUILD_SCRIPT.parent.parent
 
 
 def parse_args():
@@ -52,7 +61,12 @@ def wait_for_platform(platform_url, timeout_seconds=60):
     raise RuntimeError(f"Timed out waiting for OPACA platform at {platform_url}")
 
 
+def build_local_benchmark_images():
+    subprocess.run(["python3", str(BUILD_SCRIPT)], cwd=BUILD_SCRIPT_CWD, check=True)
+
+
 def remove_stale_docker_containers():
+    managed_images = set(BENCHMARK_CONTAINERS) | set(LEGACY_BENCHMARK_CONTAINERS)
     result = subprocess.run(
         [
             "docker",
@@ -67,7 +81,7 @@ def remove_stale_docker_containers():
     )
     for line in result.stdout.splitlines():
         container_id, image_name, status = line.split(" ", 2)
-        if image_name not in BENCHMARK_CONTAINERS:
+        if image_name not in managed_images:
             continue
         if status.startswith("Up "):
             continue
@@ -77,7 +91,7 @@ def remove_stale_docker_containers():
 
 def sync_containers(platform_url):
     containers_url = f"{platform_url.rstrip('/')}/containers"
-    managed_images = set(BENCHMARK_CONTAINERS)
+    managed_images = set(BENCHMARK_CONTAINERS) | set(LEGACY_BENCHMARK_CONTAINERS)
 
     existing = http_json("GET", containers_url, timeout_seconds=15) or []
     managed_existing = [
@@ -92,19 +106,24 @@ def sync_containers(platform_url):
         print(f"Removed managed container: {image_name} ({container_id})")
 
     for image_name in BENCHMARK_CONTAINERS:
-        http_json("POST", containers_url, {"image": {"imageName": image_name}}, timeout_seconds=600)
+        http_json(
+            "POST",
+            containers_url,
+            {"image": {"imageName": image_name, "apiPort": SAFE_BENCHMARK_API_PORT}},
+            timeout_seconds=600,
+        )
         print(f"Deployed benchmark container: {image_name}")
 
 
 def enhance_error_message(exc):
     message = str(exc)
-    port_conflict = "failed to bind host port 0.0.0.0:8082" in message
+    port_conflict = f"failed to bind host port 0.0.0.0:{SAFE_BENCHMARK_API_PORT}" in message
     if not port_conflict:
         return RuntimeError(message)
     hint = (
-        "Host port 8082 is already in use while OPACA tries to start a benchmark container. "
-        "In this devcontainer setup, the usual cause is VS Code auto-forwarding port 8082. "
-        "Close any forwarded 8082 port (or reload the VS Code window after applying the devcontainer config) "
+        f"Host port {SAFE_BENCHMARK_API_PORT} is already in use while OPACA tries to start a benchmark container. "
+        f"In this devcontainer setup, the usual cause is VS Code auto-forwarding port {SAFE_BENCHMARK_API_PORT}. "
+        f"Close any forwarded {SAFE_BENCHMARK_API_PORT} port (or reload the VS Code window after applying the devcontainer config) "
         "and retry."
     )
     return RuntimeError(f"{message}\nHint: {hint}")
@@ -112,6 +131,7 @@ def enhance_error_message(exc):
 
 def main():
     args = parse_args()
+    build_local_benchmark_images()
     wait_for_platform(args.platform_url)
     remove_stale_docker_containers()
     try:

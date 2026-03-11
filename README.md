@@ -29,6 +29,16 @@ This automatically:
 - Runs frontend dev server (port 5173)
 - Deploys the three benchmark containers to OPACA
 
+### Ports used by the local dev setup
+- `5173`: Frontend dev server
+- `3001`: Backend API / FastAPI docs
+- `8000`: OPACA platform
+- `28082-28084`: Benchmark container API ports on the host (`28082` is the preferred base port; additional benchmark containers may use the next free ports)
+- `27018`: Local MongoDB session DB (`27017` inside the container)
+- `7431`: Optional TTS server, if enabled
+
+If startup fails with an "address already in use" error, free up the matching host port and retry.
+
 ### Cleanup entries
 - **stop-sage**: stop the local backend, stop Compose services, and remove benchmark containers.
 - **soft-cleanup**: `stop-sage` plus `docker compose down --remove-orphans`.

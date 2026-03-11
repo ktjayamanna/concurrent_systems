@@ -16,7 +16,7 @@
         }
     },
     "portsAttributes": {
-        "8082": {
+        "28082": {
             "label": "OPACA benchmark container API port",
             "onAutoForward": "ignore"
         }

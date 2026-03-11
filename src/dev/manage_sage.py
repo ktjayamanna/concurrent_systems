@@ -11,7 +11,7 @@ BENCHMARK_IMAGES = [
     "rkader2811/warehouse",
     "rkader2811/music-platform",
 ]
-DEDICATED_PORTS = [3001, 5173, 8000, 8082]
+DEDICATED_PORTS = [3001, 5173, 8000, 28082]
 COMPOSE_BASE_COMMAND = ["docker", "compose", "--profile", "platform"]
 COMPOSE_STOP_SERVICES = ["platform", "session-db", "backend", "frontend"]
 
