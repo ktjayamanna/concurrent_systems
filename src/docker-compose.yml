@@ -71,8 +71,9 @@ services:
       - "8000:8000"
     environment:
       PORT: 8000
-      PUBLIC_URL: http://localhost:8000
+      PUBLIC_URL: http://172.17.0.1:8000
       PLATFORM_ENVIRONMENT: DOCKER
+      CONTAINER_TIMEOUT_SEC: 60
       ENABLE_AUTH: false
       DB_EMBED: true
     volumes:

@@ -15,6 +15,12 @@
             "dockerDashComposeVersion": "v5.0.2"
         }
     },
+    "portsAttributes": {
+        "8082": {
+            "label": "OPACA benchmark container API port",
+            "onAutoForward": "ignore"
+        }
+    },
     "customizations": {
         "vscode": {
             "extensions": [

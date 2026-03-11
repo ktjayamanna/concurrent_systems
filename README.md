@@ -22,15 +22,24 @@
 2. Press `F5` or select **"run-sage"** from the Run and Debug panel
 
 This automatically:
-- Starts Docker services (DB + backend container + OPACA platform)
+- Stops leftover SAGE processes/containers from the previous run
+- Starts Docker services (DB + OPACA platform)
 - Installs dependencies if needed
-- Runs backend server (port 3001)
+- Runs backend server locally (port 3001)
 - Runs frontend dev server (port 5173)
+- Deploys the three benchmark containers to OPACA
+
+### Cleanup entries
+- **stop-sage**: stop the local backend, stop Compose services, and remove benchmark containers.
+- **soft-cleanup**: `stop-sage` plus `docker compose down --remove-orphans`.
+- **hard-cleanup**: `soft-cleanup` plus Compose volume removal for a fully fresh reset.
+
+Stopping **run-sage** now also triggers **stop-sage** automatically.
 
 ### Manual Start
 ```bash
-cd src                               # Terminal 1
-docker compose up --build -d         # Terminal 1
+cd src                                           # Terminal 1
+docker compose --profile platform up --build -d session-db platform
 cd Backend && python3 -m src.server  # Terminal 2
 cd Frontend && npm run dev           # Terminal 3
 ```
