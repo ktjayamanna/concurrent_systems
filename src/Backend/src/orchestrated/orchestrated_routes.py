@@ -90,10 +90,10 @@ class SelfOrchestratedMethod(AbstractMethod):
                 temperature=config.temperature,
                 tool_choice="required",
                 tools=worker_agent.tools
-            )
+            ) # A clock is started at call_llm and stopped when it returns. This is what recorded as agent_time -> WorkerAgent in the benchmark (Kaveen).
 
             # Invoke the action on the connected opaca platform
-            agent_result = await self.invoke_tools(worker_agent, current_task, worker_message)
+            agent_result = await self.invoke_tools(worker_agent, current_task, worker_message) # no timing here (Kaveen)
 
             # Create agent message and stream content via websocket
             agent_messages.append(worker_message)
