@@ -41,6 +41,9 @@ services:
     # for running containers on the same Docker as the platform itself
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    # allows host.docker.internal to resolve on Linux (no-op on Mac/Windows)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   # FastAPI-based backend of SAGE
   opaca-llm-backend:
@@ -53,3 +56,6 @@ services:
       ANTHROPIC_API_KEY:
       GEMINI_API_KEY:
       MISTRAL_API_KEY:
+    # allows host.docker.internal to resolve on Linux (no-op on Mac/Windows)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

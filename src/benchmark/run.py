@@ -39,7 +39,9 @@ def parse_arguments():
     parser.add_argument("-b", "--methods", type=str, nargs="+", default=["tool-llm"], help="Specify the prompting method (formerly 'backend') that should be used. You can specify multiple methods to test.")
     parser.add_argument("-m", "--models", type=str, nargs="+", default=["openai/gpt-4o-mini"], help="Specifies the model and its host/base-url that will be used for all models in the selected method. Use the format <host>/<model_name>. You can specify multiple models to test.")
     parser.add_argument("-o", "--opaca-url", type=str, default=None, help="Where the OPACA platform is running.")
-    parser.add_argument("-l", "--llm-url", type=str, default=f"http://localhost:3001", help="Where the SAGE Backend is running.")
+    import platform
+    default_llm_url = "http://172.17.0.1:3001" if platform.system() == "Linux" else "http://localhost:3001"
+    parser.add_argument("-l", "--llm-url", type=str, default=default_llm_url, help="Where the SAGE Backend is running.")
     parser.add_argument("-c", "--chunks", type=int, default=5, help="The number of chunks the question set will be split into and evaluated in parallel.")
     parser.add_argument("-j", "--judge", action=argparse.BooleanOptionalAction, help="Whether the Judge LLM should be used for evaluation.")
     parser.add_argument("-p", "--portion", type=int, default=100, help="The portion of the question set that should be evaluated in percentage.")
@@ -368,7 +370,11 @@ async def main():
     )
 
     if opaca_url is None:
-        opaca_url = "http://host.docker.internal:8050"
+        import platform
+        if platform.system() == "Linux":
+            opaca_url = "http://172.17.0.1:8050"
+        else:
+            opaca_url = "http://host.docker.internal:8050"
 
     # Define question sets for scenarios
     questions = {
@@ -468,10 +474,9 @@ async def main():
     logging.info(f"Finished benchmark test!\tTotal questions: {len(question_set)}")
 
     # Write results into json file
-    cwd = Path.cwd()
-    if not os.path.exists(f'{cwd}/benchmark/test_runs'):
-        os.makedirs(f'{cwd}/benchmark/test_runs')
-    with open(f'{cwd}/benchmark/test_runs/{file_name}', "a") as f:
+    output_dir = Path(__file__).resolve().parent / "benchmark_results" / "Orchestration" / "tmp"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with open(output_dir / file_name, "a") as f:
         json.dump(results, f, indent=2)
 
     return

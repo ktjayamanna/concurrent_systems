@@ -3,3 +3,4 @@ augment-kv-store
 opaca-core
 opaca-llm-benchmark-containers
 .devcontainer/.env
+*.env
