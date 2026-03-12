@@ -19,6 +19,16 @@ from rich.progress import Progress, TaskID
 
 import requests
 from openai import OpenAI
+
+# Load variables from .env into the process environment (needed for judge OpenAI client)
+_env_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), ".env")
+if os.path.exists(_env_path):
+    with open(_env_path) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _v = _line.split("=", 1)
+                os.environ.setdefault(_k.strip(), _v.strip().strip('"'))
 from pydantic import BaseModel
 
 from models import EvalMatch, EvalToolParam
