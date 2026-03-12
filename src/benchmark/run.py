@@ -294,7 +294,42 @@ async def parallel_test(question_set: List, llm_url: str, opaca_url: str, method
     return results
 
 
-def setUp(opaca_url: str) -> None:
+def _update_env_url(opaca_url: str) -> None:
+    """Update OPACA_URL in .env without overwriting other variables like API keys."""
+    env_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), ".env")
+    lines = []
+    found = False
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("OPACA_URL="):
+                    lines.append(f'OPACA_URL="{opaca_url}"\n')
+                    found = True
+                else:
+                    lines.append(line)
+    if not found:
+        lines.append(f'OPACA_URL="{opaca_url}"\n')
+    with open(env_path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+
+
+def _wait_for_sage(llm_url: str, timeout: int = 30) -> None:
+    """Wait until the SAGE backend is ready."""
+    logging.info("Waiting for SAGE backend to be ready...")
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            response = requests.get(llm_url + "/methods")
+            if response.status_code == 200:
+                logging.info("SAGE backend is ready.")
+                return
+        except requests.RequestException:
+            pass
+        time.sleep(1)
+    logging.warning("SAGE backend did not become ready within timeout.")
+
+
+def setUp(opaca_url: str, llm_url: str) -> None:
     """
     Starts an already available container of the OPACA platform and then deploys all test containers to it.
     Also starts SAGE. Returns the object for the server process of SAGE (so it can be terminated
@@ -314,13 +349,14 @@ def setUp(opaca_url: str) -> None:
         for name in test_containers:
             requests.post(opaca_url + "/containers", json={"image": {"imageName": name}})
             logging.info(f"Deployed {name}!")
-        subprocess.run(["docker", "compose", "build"], cwd=os.path.dirname(os.path.realpath(__file__)))
+        _update_env_url(opaca_url)
+        subprocess.run(["docker", "compose", "up", "-d", "--build"], cwd=os.path.dirname(os.path.realpath(__file__)))
+        _wait_for_sage(llm_url)
         return
     except requests.exceptions.RequestException as e:
         logging.info("Creating new OPACA platform environment...")
 
-    with open(".env", "w", encoding="utf-8") as f:
-        f.write(f'OPACA_URL="{opaca_url}"\n')
+    _update_env_url(opaca_url)
 
     # Start the OPACA platform
     # The compose stack should have been started and exited previously...
@@ -338,6 +374,7 @@ def setUp(opaca_url: str) -> None:
         except requests.RequestException as e:
             pass    # OPACA platform not started yet
         time.sleep(1)
+    _wait_for_sage(llm_url)
 
     # Deploy containers to OPACA platform
     logging.info("Deploying OPACA containers for testing...")
@@ -400,7 +437,7 @@ async def main():
 
     # Setup the OPACA platform
     try:
-        setUp(opaca_url)
+        setUp(opaca_url, llm_url)
     except Exception as e:
         logging.error(f'Failed to setup the test environment: {str(e)}')
         exit(1)
