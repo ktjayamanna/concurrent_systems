@@ -93,7 +93,9 @@ class SelfOrchestratedMethod(AbstractMethod):
             ) # A clock is started at call_llm and stopped when it returns. This is what recorded as agent_time -> WorkerAgent in the benchmark (Kaveen).
 
             # Invoke the action on the connected opaca platform
-            agent_result = await self.invoke_tools(worker_agent, current_task, worker_message) # no timing here (Kaveen)
+            _tool_start = time.time()
+            agent_result = await self.invoke_tools(worker_agent, current_task, worker_message)
+            agent_messages.append(AgentMessage(agent="WorkerAgent (tool invoke)", execution_time=time.time() - _tool_start))
 
             # Create agent message and stream content via websocket
             agent_messages.append(worker_message)
@@ -210,7 +212,9 @@ class SelfOrchestratedMethod(AbstractMethod):
                 )
 
                 # Invoke the tool call on the connected opaca platform
+                _tool_start = time.time()
                 result = await self.invoke_tools(agent, task.task, worker_message)
+                agent_messages.append(AgentMessage(agent="WorkerAgent (tool invoke)", execution_time=time.time() - _tool_start))
                 agent_messages.append(worker_message)
 
             if agent_evaluator:
@@ -263,7 +267,9 @@ Now, using the tools available to you and the previous results, continue with yo
                         status_message="Retrying task"
                     )
 
+                    _tool_start = time.time()
                     result = await self.invoke_tools(agent, task.task, worker_message)
+                    agent_messages.append(AgentMessage(agent="WorkerAgent (tool invoke)", execution_time=time.time() - _tool_start))
                     agent_messages.append(worker_message)
             
             return result
