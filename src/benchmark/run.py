@@ -268,8 +268,12 @@ async def parallel_test(question_set: List, llm_url: str, opaca_url: str, method
 
             # Accumulate the time of each agent
             agent_time = defaultdict(float)
+            worker_agent_execution_time = 0.0
             for agent_message in result["agent_messages"]:
-                agent_time[f'{agent_message["agent"]}'] += agent_message["execution_time"]
+                if agent_message["agent"] == "WorkerAgent (tool invoke)":
+                    worker_agent_execution_time += agent_message["execution_time"]
+                else:
+                    agent_time[f'{agent_message["agent"]}'] += agent_message["execution_time"]
 
             # Write the results into a file
             results.append({
@@ -279,6 +283,7 @@ async def parallel_test(question_set: List, llm_url: str, opaca_url: str, method
                 "iterations": result["iterations"],
                 "time": result["execution_time"],
                 "agent_time": dict(agent_time),
+                "worker_agent_execution_time": worker_agent_execution_time,
                 "response_metadata": {
                     "prompt_tokens": sum([message["response_metadata"].get("prompt_tokens", 0) for message in result["agent_messages"]]),
                     "completion_tokens": sum([message["response_metadata"].get("completion_tokens", 0) for message in result["agent_messages"]]),
