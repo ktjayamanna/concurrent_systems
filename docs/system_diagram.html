@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>SAGE++ Class Design</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f0f2f5;
+      padding: 32px;
+      color: #1a1a2e;
+    }
+    h1 {
+      font-size: 1.4rem;
+      font-weight: 600;
+      margin-bottom: 8px;
+      color: #1a1a2e;
+    }
+    .subtitle {
+      font-size: 0.85rem;
+      color: #6c757d;
+      margin-bottom: 24px;
+    }
+    .card {
+      background: #ffffff;
+      border-radius: 12px;
+      padding: 32px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+    }
+    .legend {
+      display: flex;
+      gap: 24px;
+      flex-wrap: wrap;
+      margin-top: 28px;
+      padding-top: 20px;
+      border-top: 1px solid #e9ecef;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.8rem;
+      color: #495057;
+    }
+    .legend-swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 3px;
+      border: 1px solid rgba(0,0,0,0.15);
+    }
+    .mermaid { display: flex; justify-content: center; }
+  </style>
+</head>
+<body>
+  <h1>SAGE++ Class Interaction Diagram</h1>
+  <p class="subtitle">Shows ownership, delegation, and runtime data flow between all classes.</p>
+
+  <div class="card">
+    <div class="mermaid">
+flowchart TD
+
+  %% ── External / unmodified SAGE ──────────────────────────────────────
+  SOM["SelfOrchestratedMethod<br/><i>(SAGE [unmodified])</i>"]:::external
+  OPACA["OPACA Interface<br/><i>(external dispatch)</i>"]:::external
+  EVAL["Evaluator<br/><i>(external)</i>"]:::external
+  WTE["Worker Tool Executor<br/><i>(external)</i>"]:::external
+
+  %% ── SAGE++ entry point ───────────────────────────────────────────────
+  SAT["<b>SpeculativeAgentTrio</b><br/>─────────────────────<br/>engine<br/>mode_flag<br/>─────────────────────<br/>handle_subtask()"]:::core
+
+  %% ── Orchestrator ─────────────────────────────────────────────────────
+  SEE["<b>SpeculativeExecutionEngine</b><br/>─────────────────────<br/>predictor · hazard_detection_unit<br/>reorder_buffer · timeout_ms · opaca_interface<br/>─────────────────────<br/>on_subtask_arrival() · predict_tool_call()<br/>classify_tool() · dispatch_speculative()<br/>await_or_cancel() · commit_or_flush()"]:::core
+
+  %% ── Components ───────────────────────────────────────────────────────
+  P["<b>«abstract» Predictor</b><br/>─────────────────────<br/>model_or_cache · history<br/>─────────────────────<br/>predict(context)<br/>update(outcome)"]:::component
+
+  HDU["<b>HazardDetectionUnit</b><br/>─────────────────────<br/>tool_safety_table<br/>─────────────────────<br/>classify(tool) → Safe|Unsafe<br/>is_safe(tool) → bool"]:::component
+
+  ROB["<b>ReorderBuffer</b><br/>─────────────────────<br/>pending_result · pending_tool_call<br/>lock: asyncio.Lock<br/>─────────────────────<br/>commit(predicted, actual) → result|None<br/>flush()  O(1)"]:::component
+
+  %% ── Predictor variants ───────────────────────────────────────────────
+  LRU["<b>HabitBasedLRU</b><br/>─────────<br/>lru_cache<br/>─────────<br/>predict()<br/>update()"]:::variant
+  NB["<b>NaiveBayes</b><br/>─────────<br/>classifier_params<br/>feature_extractor<br/>─────────<br/>predict()<br/>update()"]:::variant
+  LLM["<b>SmallLLM</b><br/>─────────<br/>model_id<br/>prompt_template<br/>─────────<br/>predict()"]:::variant
+
+  %% ── Edges ────────────────────────────────────────────────────────────
+  SOM     -. "extends" .->     SAT
+  SAT     -- "owns / delegates\n(SAGE++ mode only)" --> SEE
+
+  SEE     -- "predict_tool_call()" --> P
+  SEE     -- "classify_tool()" -->     HDU
+  SEE     -- "dispatch_speculative()" --> OPACA
+  SEE     -- "store pending result" -->  ROB
+
+  OPACA   -- "speculative result" -->  ROB
+
+  P       -. "implements" .->  LRU
+  P       -. "implements" .->  NB
+  P       -. "implements" .->  LLM
+
+  ROB     -- "HIT: forward result" -->   EVAL
+  ROB     -- "MISS: flush + signal" -->  WTE
+
+  %% ── Styles ───────────────────────────────────────────────────────────
+  classDef external fill:#e9ecef,stroke:#adb5bd,color:#495057
+  classDef core      fill:#4263eb,stroke:#3b5bdb,color:#ffffff
+  classDef component fill:#0ca678,stroke:#099268,color:#ffffff
+  classDef variant   fill:#74c0fc,stroke:#339af0,color:#1c3d6b
+
+  %% ── Layout hints ─────────────────────────────────────────────────────
+  subgraph predictor_group["Predictor Variants"]
+    LRU
+    NB
+    LLM
+  end
+    </div>
+
+    <div class="legend">
+      <div class="legend-item">
+        <div class="legend-swatch" style="background:#4263eb;border-color:#3b5bdb;"></div>
+        SAGE++ classes (owned by this project)
+      </div>
+      <div class="legend-item">
+        <div class="legend-swatch" style="background:#0ca678;border-color:#099268;"></div>
+        Internal components
+      </div>
+      <div class="legend-item">
+        <div class="legend-swatch" style="background:#74c0fc;border-color:#339af0;"></div>
+        Predictor variants (other team)
+      </div>
+      <div class="legend-item">
+        <div class="legend-swatch" style="background:#e9ecef;border-color:#adb5bd;"></div>
+        External / unmodified SAGE
+      </div>
+      <div class="legend-item" style="margin-left:8px;">
+        <span style="font-size:1rem;">───</span>&nbsp;ownership / data flow
+      </div>
+      <div class="legend-item">
+        <span style="font-size:1rem; letter-spacing:-2px;">─ ─</span>&nbsp;inheritance / interface
+      </div>
+    </div>
+  </div>
+
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'base',
+      themeVariables: {
+        primaryColor: '#4263eb',
+        primaryTextColor: '#fff',
+        primaryBorderColor: '#3b5bdb',
+        lineColor: '#495057',
+        fontSize: '13px'
+      },
+      flowchart: { curve: 'basis', padding: 20 }
+    });
+  </script>
+</body>
+</html>

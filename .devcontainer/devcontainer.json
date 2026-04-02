@@ -29,7 +29,8 @@
                 "pomdtr.excalidraw-editor",
                 "ms-python.python",
                 "anthropic.claude-code",
-                "openai.chatgpt"
+                "openai.chatgpt",
+                "ritwickdey.liveserver"
             ]
         }
     }
