@@ -20,4 +20,4 @@ class BasePredictor(ABC):
         Returns:
             Predicted tool name
         """
-        pass
+        return "" #@TODO

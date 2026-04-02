@@ -6,7 +6,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Dict, Any
 import logging
 from collections import defaultdict, Counter
 from copy import deepcopy
@@ -220,6 +220,27 @@ async def evaluate_tools(_actual_tools, _expected_tools):
     return result
 
 
+def _extract_speculation_flag(result: Dict[str, Any]) -> Optional[bool]:
+    """
+    Best-effort extraction of whether speculative execution was attempted.
+    This supports future schema additions without breaking older runs.
+    """
+    if isinstance(result.get("speculative"), bool):
+        return result["speculative"]
+
+    speculation = result.get("speculation")
+    if isinstance(speculation, dict):
+        for key in ("attempted", "speculated", "enabled", "ran"):
+            if key in speculation:
+                return bool(speculation[key])
+
+    speculative_tools = result.get("speculative_tools")
+    if isinstance(speculative_tools, list):
+        return len(speculative_tools) > 0
+
+    return None
+
+
 async def parallel_test(question_set: List, llm_url: str, opaca_url: str, method: str, model: str, use_judge: bool, progress: Progress, task_id: TaskID):
     # Create a unique session for requests
     async with httpx.AsyncClient(http2=False, limits=httpx.Limits(max_connections=1), headers={"Connection": "close"}) as session:
@@ -279,6 +300,8 @@ async def parallel_test(question_set: List, llm_url: str, opaca_url: str, method
             results.append({
                 "question": call["input"],
                 "expected_answer": call["output"],
+                "speculative_expected": call.get("speculative"),
+                "speculative_observed": _extract_speculation_flag(result),
                 "response": result["content"],
                 "iterations": result["iterations"],
                 "time": result["execution_time"],
@@ -491,6 +514,7 @@ async def main():
             total_time = 0
             total_server_time = 0
             average_score = 0.0
+            speculation_violations = 0
 
             # Extract benchmark results
             for q in q_results:
@@ -503,6 +527,11 @@ async def main():
                 total_time += q["time"]
                 total_server_time += q["server_time"]
                 average_score += q.get("score", 0)
+                expected_spec = q.get("speculative_expected")
+                observed_spec = q.get("speculative_observed")
+                if isinstance(expected_spec, bool) and observed_spec is not None:
+                    if observed_spec != expected_spec:
+                        speculation_violations += 1
             average_score /= len(q_results)
 
             # Create a summary of the test run
@@ -516,11 +545,16 @@ async def main():
                 "total_server_time": total_server_time,
                 "agent_time": agent_time,
                 "total_token_usage": total_token_usage,
+                "speculation_violations": speculation_violations,
             }}
             if use_judge:
                 result["summary"]["average_score"] = average_score
 
             results[method][model] = result
+            # Strip internal speculation fields; keep only aggregate in summary.
+            for q in results[method][model]["questions"]:
+                q.pop("speculative_expected", None)
+                q.pop("speculative_observed", None)
             progress.stop()
 
     logging.info(f"Finished benchmark test!\tTotal questions: {len(question_set)}")

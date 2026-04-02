@@ -96,6 +96,7 @@ class QueryResponse(BaseModel):
         execution_time: The total execution time it took for the selected method to generate an answer.
         content: The generated response that will be shown to the user.
         error: An optional output for any error messages that were generated.
+        speculative: Optional flag indicating whether speculative execution was attempted.
     """
     query: str = ''
     agent_messages: List[AgentMessage] = []
@@ -103,6 +104,7 @@ class QueryResponse(BaseModel):
     execution_time: float = .0
     content: str = ''
     error: str = ''
+    speculative: bool | None = None
 
     @staticmethod
     def from_exception(user_query: str, exception: Exception) -> 'QueryResponse':
