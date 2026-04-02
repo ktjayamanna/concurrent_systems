@@ -3,10 +3,14 @@ Speculative self-orchestrated method - SAGE++ implementation.
 """
 
 import logging
-from typing import Dict, Any
 
 from ..orchestrated import SelfOrchestratedMethod
 from ..models import QueryResponse, Chat
+
+from .speculative_engine import SpeculativeExecutionEngine
+from .reorder_buffer import ReorderBuffer
+from .predictor.algorithms import DummyPredictor
+from .hazard_detection import HazardDetectionUnit
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +26,12 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # TODO: Initialize speculative components
+        self.speculative_engine = SpeculativeExecutionEngine()
+        self.reorder_buffer = ReorderBuffer()
+        self.predictor = DummyPredictor()
+        self.hazard_unit = HazardDetectionUnit()
+
+
         
     async def query(self, message: str, chat: Chat) -> QueryResponse:
         """

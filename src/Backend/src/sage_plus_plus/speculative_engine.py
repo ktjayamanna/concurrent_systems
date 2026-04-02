@@ -6,7 +6,7 @@ import asyncio
 import logging
 from typing import Any, Optional
 
-from .predictor.base import BasePredictor
+from .predictor.algorithms import BasePredictor
 from .hazard_detection import HazardDetectionUnit
 from .reorder_buffer import ReorderBuffer
 
