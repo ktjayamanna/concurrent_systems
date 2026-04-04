@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>True Parallelism — SAGE++ Ideal</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', sans-serif; background: #0f1117; color: #e0e0e0; padding: 30px; }
+  h1 { font-size: 1.4rem; color: #7eb8f7; margin-bottom: 6px; }
+  .subtitle { font-size: 0.85rem; color: #888; margin-bottom: 24px; }
+
+  .controls { display: flex; gap: 16px; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
+  label { font-size: 0.82rem; color: #aaa; }
+  input[type=range] { accent-color: #7eb8f7; width: 120px; }
+  .val { font-size: 0.82rem; color: #7eb8f7; min-width: 38px; }
+  .slider-group { display: flex; align-items: center; gap: 6px; transition: opacity 0.2s; }
+  .slider-group.dimmed { opacity: 0.3; pointer-events: none; }
+  .slider-note { font-size: 0.72rem; color: #6a6a6a; font-style: italic; margin-left: 4px; }
+
+  .toggle-row { display: flex; gap: 0; margin-bottom: 24px; }
+  .toggle-btn {
+    padding: 8px 28px; border: 1px solid #3a5fad; cursor: pointer;
+    font-size: 0.88rem; font-weight: 700; transition: all 0.2s;
+    background: #12141c; color: #7eb8f7;
+  }
+  .toggle-btn:first-child { border-radius: 6px 0 0 6px; }
+  .toggle-btn:last-child  { border-radius: 0 6px 6px 0; border-left: none; }
+  .toggle-btn.active { background: #3a5fad; color: #fff; }
+
+  .timeline-wrap {
+    background: #1a1d27; border-radius: 12px; padding: 28px 24px;
+    border: 1px solid #2a2d3a;
+  }
+  .thread-row { display: flex; align-items: center; margin-bottom: 18px; }
+  .thread-label {
+    width: 140px; font-size: 0.78rem; color: #aaa; text-align: right;
+    padding-right: 14px; flex-shrink: 0;
+  }
+  .track {
+    flex: 1; height: 36px; background: #12141c;
+    border-radius: 6px; position: relative; overflow: visible;
+  }
+  .block {
+    position: absolute; height: 100%; border-radius: 5px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.7rem; font-weight: 600; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; padding: 0 6px;
+    cursor: default;
+  }
+  .block:hover { filter: brightness(1.3); }
+
+  .predict  { background: #3a5fad; color: #c8dcff; }
+  .invoke   { background: #1e7a5a; color: #a8ffdc; }
+  .invoke-main { background: #1e5a7a; color: #a0d8ff; }
+  .llm      { background: #7a3a8a; color: #f0c8ff; }
+  .compare  { background: #8a6a00; color: #ffe8a0; }
+  .commit   { background: #1e6a7a; color: #a0f0ff; }
+  .cancelled{ background: repeating-linear-gradient(45deg,#3a1e1e,#3a1e1e 5px,#2a1515 5px,#2a1515 10px); color: #ff8888; border: 1px dashed #aa3333; }
+  .waiting  { background: repeating-linear-gradient(45deg,#1e2030,#1e2030 6px,#23263a 6px,#23263a 12px); color: #666; }
+  .idle     { background: #1e2030; color: #444; border: 1px dashed #2a2d3a; font-style: italic; }
+
+  .time-axis { display: flex; align-items: flex-start; margin-left: 140px; margin-top: 10px; }
+  .tick-wrap { flex: 1; display: flex; }
+  .tick { flex: 1; text-align: center; font-size: 0.68rem; color: #555; border-left: 1px solid #2a2d3a; padding-top: 4px; }
+
+  .total-bar {
+    margin-left: 140px; margin-top: 22px;
+    background: #12141c; border-radius: 6px; height: 28px;
+    position: relative; overflow: hidden; border: 1px solid #2a2d3a;
+  }
+  .total-fill {
+    position: absolute; left: 0; top: 0; height: 100%;
+    border-radius: 6px; display: flex; align-items: center;
+    padding-left: 10px; font-size: 0.75rem; font-weight: 700; color: #fff;
+    transition: width 0.35s ease;
+  }
+  .fill-match    { background: linear-gradient(90deg, #3a5fad, #1e7a5a); }
+  .fill-mismatch { background: linear-gradient(90deg, #7a3a8a, #1e5a7a); }
+
+  .total-label { margin-left: 140px; margin-top: 6px; font-size: 0.75rem; color: #7eb8f7; }
+
+  .legend {
+    display: flex; gap: 14px; flex-wrap: wrap; margin-top: 22px;
+    padding-top: 16px; border-top: 1px solid #2a2d3a;
+  }
+  .leg-item { display: flex; align-items: center; gap: 7px; font-size: 0.74rem; color: #aaa; }
+  .leg-box { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; }
+
+  .info-box {
+    margin-top: 20px; padding: 14px 16px;
+    border-left: 3px solid #7eb8f7; border-radius: 4px;
+    font-size: 0.78rem; color: #aaa; line-height: 1.8;
+    background: #1a2535;
+  }
+  .info-box strong { color: #7eb8f7; }
+  .green { color: #88ffbb; font-weight: 700; }
+  .red   { color: #ff8888; font-weight: 700; }
+
+  .tooltip {
+    position: fixed; background: #2a2d3a; border: 1px solid #444;
+    border-radius: 8px; padding: 10px 14px; font-size: 0.78rem;
+    color: #e0e0e0; pointer-events: none; z-index: 100;
+    max-width: 260px; line-height: 1.5; display: none;
+  }
+</style>
+</head>
+<body>
+
+<h1>True Parallelism — SAGE++ Ideal (OS Threads)</h1>
+<p class="subtitle">Two OS threads on separate CPU cores. Both start at t=0 simultaneously — no CPU blocking between them.</p>
+
+<div class="controls">
+  <label>predict() <input type="range" id="sPredict" min="50" max="800" value="300"> <span class="val" id="sPredictVal">300</span>ms</label>
+  <label>invoke_opaca (shadow) <input type="range" id="sInvoke" min="500" max="4000" value="2000"> <span class="val" id="sInvokeVal">2000</span>ms</label>
+  <label>call_llm (LLM) <input type="range" id="mLLM" min="500" max="4000" value="1500"> <span class="val" id="mLLMVal">1500</span>ms</label>
+  <span class="slider-group" id="mInvokeGroup">
+    <label>invoke_tools (main) <input type="range" id="mInvoke" min="300" max="4000" value="1800"> <span class="val" id="mInvokeVal">1800</span>ms</label>
+    <span class="slider-note" id="mInvokeNote">only used on MISMATCH</span>
+  </span>
+</div>
+
+<div class="toggle-row">
+  <button class="toggle-btn active" id="btnMatch" onclick="setMode('match')">✓ MATCH — speculative hit</button>
+  <button class="toggle-btn" id="btnMiss" onclick="setMode('miss')">✗ MISMATCH — speculative miss</button>
+</div>
+
+<div class="timeline-wrap">
+  <div class="thread-row">
+    <div class="thread-label">Shadow Thread<br><span style="font-size:0.68rem;color:#555">Core 2</span></div>
+    <div class="track" id="shadowTrack"></div>
+  </div>
+  <div class="thread-row">
+    <div class="thread-label">Main Thread<br><span style="font-size:0.68rem;color:#555">Core 1</span></div>
+    <div class="track" id="mainTrack"></div>
+  </div>
+  <div class="time-axis"><div class="tick-wrap" id="ticks"></div></div>
+  <div class="total-bar"><div class="total-fill" id="totalFill"></div></div>
+  <div class="total-label" id="totalLabel"></div>
+
+  <div class="legend">
+    <div class="leg-item"><div class="leg-box predict"></div>predict()</div>
+    <div class="leg-item"><div class="leg-box invoke"></div>invoke_opaca (shadow)</div>
+    <div class="leg-item"><div class="leg-box llm"></div>call_llm()</div>
+    <div class="leg-item"><div class="leg-box invoke-main"></div>invoke_tools (main fallback)</div>
+    <div class="leg-item"><div class="leg-box compare"></div>compare names</div>
+    <div class="leg-item"><div class="leg-box commit"></div>commit from ROB</div>
+    <div class="leg-item"><div class="leg-box waiting"></div>waiting for shadow</div>
+    <div class="leg-item"><div class="leg-box cancelled"></div>cancelled (MISMATCH)</div>
+  </div>
+</div>
+
+<div class="info-box" id="infoBox"></div>
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+let mode = 'match';
+
+const sliders = { sPredict: 'sPredictVal', sInvoke: 'sInvokeVal', mLLM: 'mLLMVal', mInvoke: 'mInvokeVal' };
+Object.keys(sliders).forEach(k => {
+  document.getElementById(k).oninput = () => {
+    document.getElementById(sliders[k]).textContent = document.getElementById(k).value;
+    draw();
+  };
+});
+
+function setMode(m) {
+  mode = m;
+  document.getElementById('btnMatch').classList.toggle('active', m === 'match');
+  document.getElementById('btnMiss').classList.toggle('active', m === 'miss');
+  document.getElementById('mInvokeGroup').classList.toggle('dimmed', m === 'match');
+  draw();
+}
+
+function draw() {
+  const sp = +document.getElementById('sPredict').value;
+  const si = +document.getElementById('sInvoke').value;
+  const ml = +document.getElementById('mLLM').value;
+  const mi = +document.getElementById('mInvoke').value;
+
+  // True parallelism: both threads start at t=0
+  const llmEnd     = ml;
+  const compareEnd = llmEnd + 20;
+
+  let shadowBlocks, mainBlocks, total, fillClass, labelText, infoHtml;
+
+  if (mode === 'match') {
+    // MATCH: shadow invocation finishes, main awaits it then commits
+    const shadowDone = sp + si;
+    const waitEnd    = Math.max(compareEnd, shadowDone);
+    const commitEnd  = waitEnd + 40;
+    total = commitEnd;
+
+    shadowBlocks = [
+      { cls: 'predict', start: 0,  end: sp,        label: `predict() ${sp}ms`,          tip: 'Shadow predicts tool name on Core 2. Runs at t=0 simultaneously with main\'s call_llm().' },
+      { cls: 'invoke',  start: sp, end: shadowDone, label: `invoke_opaca ${si}ms`,       tip: 'Shadow sends tool request to OPACA. Network I/O — thread sleeps while OS handles socket.' },
+    ];
+    mainBlocks = [
+      { cls: 'llm',     start: 0,           end: llmEnd,     label: `call_llm() ${ml}ms`,     tip: 'Main thread calls the LLM. Starts at t=0 simultaneously — no blocking from shadow.' },
+      { cls: 'compare', start: llmEnd,       end: compareEnd, label: 'compare',                tip: 'LLM returned. Compare shadow prediction name vs actual tool name from LLM. MATCH.' },
+      ...(shadowDone > compareEnd
+        ? [{ cls: 'waiting', start: compareEnd, end: shadowDone, label: `await shadow ${shadowDone - compareEnd}ms`, tip: 'Names match. Shadow still invoking OPACA. Main waits for shadow to finish rather than starting a duplicate call.' }]
+        : []),
+      { cls: 'commit',  start: waitEnd,      end: commitEnd,  label: 'commit',                 tip: 'Commit speculative result from ROB. invoke_tools() on main is SKIPPED entirely.' },
+    ];
+
+    const seqTotal = sp + si + ml + 20 + 40;
+    const saved = seqTotal - commitEnd;
+    fillClass = 'fill-match';
+    labelText = `✓ MATCH total: ${commitEnd}ms  |  Sequential baseline: ${seqTotal}ms  |  Saved: ${saved}ms`;
+    infoHtml = `<strong>MATCH path:</strong> Shadow predicted the correct tool. Main skips invoke_tools entirely.<br>
+    Both threads started at <span class="green">t=0</span> — zero CPU penalty for predict().<br>
+    ${shadowDone <= compareEnd
+      ? `Shadow finished before LLM returned — <span class="green">zero wait</span>, maximum overlap.`
+      : `Shadow took ${shadowDone - compareEnd}ms longer than the LLM — main waits that extra time. Still faster than sequential by <span class="green">${saved}ms</span>.`}`;
+  } else {
+    // MISMATCH: shadow is cancelled at compare time, main runs invoke_tools
+    const cancelAt   = compareEnd;
+    const invokeEnd  = compareEnd + mi;
+    total = invokeEnd;
+
+    const shadowCancelEnd = Math.min(sp + si, cancelAt);
+
+    shadowBlocks = [
+      { cls: 'predict',   start: 0,             end: sp,             label: `predict() ${sp}ms`,     tip: 'Shadow predicts tool name. Runs at t=0 simultaneously with call_llm().' },
+      { cls: 'invoke',    start: sp,             end: shadowCancelEnd, label: `invoke_opaca...`,      tip: 'Shadow starts OPACA invocation. Cancelled immediately when names don\'t match.' },
+      { cls: 'cancelled', start: shadowCancelEnd, end: cancelAt,      label: 'cancelled ✗',           tip: 'Shadow task cancelled at compare time — names don\'t match. No wasted work beyond this point.' },
+    ];
+    mainBlocks = [
+      { cls: 'llm',        start: 0,          end: llmEnd,     label: `call_llm() ${ml}ms`,  tip: 'Main calls LLM. Starts at t=0 — no blocking from shadow.' },
+      { cls: 'compare',    start: llmEnd,      end: compareEnd, label: 'compare',              tip: 'Names do NOT match. Cancel shadow immediately.' },
+      { cls: 'invoke-main',start: compareEnd,  end: invokeEnd,  label: `invoke_tools ${mi}ms`, tip: 'Shadow cancelled. Main runs invoke_tools() normally to get the tool result.' },
+    ];
+
+    const seqTotal = sp + si + ml + 20 + mi;
+    const diff = invokeEnd - ml - 20 - mi;
+    fillClass = 'fill-mismatch';
+    labelText = `✗ MISMATCH total: ${invokeEnd}ms  |  Sequential (no speculation): ${ml + 20 + mi}ms  |  Extra cost: ${Math.max(0,diff)}ms`;
+    infoHtml = `<strong>MISMATCH path:</strong> Shadow predicted the wrong tool. Main must run invoke_tools() normally.<br>
+    Shadow is cancelled <span class="red">immediately</span> at compare time — no extra OPACA calls complete wastefully.<br>
+    The predict() work (${sp}ms on Core 2) was wasted, but since it ran on a separate core it <span class="green">cost main nothing</span>.<br>
+    Total = call_llm (${ml}ms) + compare (20ms) + invoke_tools (${mi}ms) = <strong>${invokeEnd}ms</strong> — identical to non-speculative SAGE.`;
+  }
+
+  renderTrack('shadowTrack', shadowBlocks, total);
+  renderTrack('mainTrack',   mainBlocks,   total);
+  renderTicks(total);
+
+  const fill = document.getElementById('totalFill');
+  fill.className = 'total-fill ' + fillClass;
+  fill.style.width = '100%';
+  fill.textContent = labelText;
+  document.getElementById('totalLabel').textContent = '';
+  document.getElementById('infoBox').innerHTML = infoHtml;
+}
+
+function renderTrack(id, blocks, total) {
+  const track = document.getElementById(id);
+  track.innerHTML = '';
+  blocks.forEach(b => {
+    const div = document.createElement('div');
+    div.className = 'block ' + b.cls;
+    div.style.left  = (b.start / total * 100) + '%';
+    div.style.width = ((b.end - b.start) / total * 100) + '%';
+    div.textContent = b.label;
+    div.onmouseenter = e => showTip(e, b.tip);
+    div.onmousemove  = e => moveTip(e);
+    div.onmouseleave = () => hideTip();
+    track.appendChild(div);
+  });
+}
+
+function renderTicks(total) {
+  const c = document.getElementById('ticks');
+  c.innerHTML = '';
+  const step = total < 2000 ? 200 : total < 5000 ? 500 : 1000;
+  for (let i = 0; i * step <= total + step; i++) {
+    const d = document.createElement('div');
+    d.className = 'tick';
+    d.textContent = (i * step) + 'ms';
+    d.style.flex = step;
+    c.appendChild(d);
+  }
+}
+
+function showTip(e, t) { const el = document.getElementById('tooltip'); el.textContent = t; el.style.display = 'block'; moveTip(e); }
+function moveTip(e)    { const el = document.getElementById('tooltip'); el.style.left = (e.clientX+14)+'px'; el.style.top = (e.clientY+14)+'px'; }
+function hideTip()     { document.getElementById('tooltip').style.display = 'none'; }
+
+document.getElementById('mInvokeGroup').classList.add('dimmed'); // MATCH is default
+draw();
+</script>
+</body>
+</html>
