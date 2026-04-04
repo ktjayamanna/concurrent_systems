@@ -1,12 +1,21 @@
 """
 Speculative self-orchestrated method - SAGE++ implementation.
+
+Uses Python 3.14 free-threaded mode (no GIL) to achieve true parallelism:
+  - Shadow OS thread: predictor.predict() + synchronous OPACA invocation
+  - Main asyncio coroutine: call_llm(WorkerAgent)
+
+Both run on separate CPU cores simultaneously. The asyncio event loop is
+bridged to the shadow thread via loop.call_soon_threadsafe() for signalling
+and threading.Event for cancellation.
 """
 
 import json
 import logging
 import time
-from typing import Dict, List, Optional, Any
+import threading
 import asyncio
+from typing import Dict, List, Optional, Any
 
 from ..orchestrated import SelfOrchestratedMethod
 from ..orchestrated.orchestrated_routes import OrchestrationConfig
@@ -25,15 +34,17 @@ logger = logging.getLogger(__name__)
 
 class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
     """
-    SAGE++ - Extends SelfOrchestratedMethod with speculative execution.
+    SAGE++ — true parallel speculative execution via GIL-free OS threads.
 
-    Two-phase shadow thread:
-      Phase 1: shadow predicts tool name → signals prediction_ready future
-      Phase 2: shadow invokes tool concurrently with main thread's call_llm()
+    Shadow OS thread (Core N):
+      predict() → invoke_opaca_action() synchronously
+
+    Main asyncio coroutine (Core 1):
+      call_llm(WorkerAgent) — starts at t=0, no blocking from shadow
 
     After call_llm() returns:
-      MATCH → await shadow (let it finish), commit result from ROB, skip invoke_tools
-      MISS  → cancel shadow immediately, run invoke_tools normally
+      MATCH → join shadow thread, commit from ROB, skip invoke_tools()
+      MISS  → cancel_event.set(), main runs invoke_tools() normally
     """
 
     NAME = "sage++"
@@ -49,31 +60,56 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
     def _is_error_result(result: Any) -> bool:
         return isinstance(result, str) and result.startswith("Failed")
 
-    async def _run_shadow_and_commit(
+    def _launch_shadow(
         self,
         subtask: str,
+        rob: ReorderBuffer,
+        loop: asyncio.AbstractEventLoop,
+        prediction_future: asyncio.Future,
+        cancel_event: threading.Event,
+    ) -> threading.Thread:
+        """Launch shadow OS thread. Returns immediately — thread runs in parallel."""
+        shadow = threading.Thread(
+            target=self.speculative_engine.run_speculative,
+            args=(
+                subtask,
+                self.session.opaca_client,
+                self.hazard_unit,
+                self.predictor,
+                rob,
+                loop,
+                prediction_future,
+                cancel_event,
+            ),
+            daemon=True,
+        )
+        shadow.start()
+        return shadow
+
+    async def _run_shadow_and_commit(
+        self,
         worker_message,
         rob: ReorderBuffer,
-        shadow_task: asyncio.Task,
+        shadow: threading.Thread,
         shadow_prediction: Optional[str],
+        cancel_event: threading.Event,
         agent,
         current_task: str,
         agent_messages: List[AgentMessage],
     ) -> AgentResult:
         """
-        Given the main thread's LLM result and the shadow's predicted name,
+        Given the main thread's LLM result and shadow's predicted name,
         either commit the speculative result (MATCH) or cancel and invoke normally (MISS).
         """
         actual_tool = worker_message.tools[0].name if worker_message.tools else None
 
         if shadow_prediction and actual_tool and shadow_prediction == actual_tool:
-            # MATCH — wait for shadow to finish its invocation (it's already running)
-            try:
-                await shadow_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            # MATCH — wait for shadow thread to finish its OPACA invocation
+            await asyncio.get_running_loop().run_in_executor(
+                None, shadow.join, self.speculative_engine.timeout
+            )
 
-            speculative_result = await rob.commit(shadow_prediction, actual_tool)
+            speculative_result = rob.commit(shadow_prediction, actual_tool)
 
             if speculative_result is not None and not self._is_error_result(speculative_result):
                 # HIT — inject result, skip invoke_tools entirely
@@ -93,10 +129,10 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
                     tool_calls=worker_message.tools,
                 )
 
-        # MISS or shadow invocation failed — cancel shadow, invoke normally
+        # MISS — signal shadow to discard its result, run invoke_tools normally
         self._metrics["misses"] += 1
-        shadow_task.cancel()
-        await rob.flush()
+        cancel_event.set()
+        rob.flush()
         _tool_start = time.time()
         result = await self.invoke_tools(agent, current_task, worker_message)
         agent_messages.append(AgentMessage(agent="WorkerAgent (tool invoke)", execution_time=time.time() - _tool_start))
@@ -110,7 +146,7 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
             all_results: List[AgentResult],
             agent_messages: List[AgentMessage],
     ) -> List[AgentResult]:
-        """Speculative version of _execute_round."""
+        """Speculative version of _execute_round using GIL-free OS threads."""
 
         agent_evaluator = AgentEvaluator() if config.use_agent_evaluator else None
 
@@ -121,29 +157,21 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
                 round_context: str,
         ) -> AgentResult:
             current_task = f"{subtask.task}\n\n{orchestrator_context}\n{round_context}"
+
             rob = ReorderBuffer()
+            loop = asyncio.get_running_loop()
+            prediction_future = loop.create_future()
+            cancel_event = threading.Event()
 
-            # Create future that shadow sets as soon as it has a predicted name
-            prediction_ready = asyncio.get_running_loop().create_future()
-
-            # Launch shadow — Phase 1 (predict) runs immediately on first await below
-            shadow_task = asyncio.create_task(
-                self.speculative_engine.run_speculative(
-                    subtask=current_task,
-                    opaca_client=self.session.opaca_client,
-                    hazard_unit=self.hazard_unit,
-                    predictor=self.predictor,
-                    rob=rob,
-                    prediction_ready=prediction_ready,
-                )
-            )
+            # Launch shadow OS thread — runs predict() on a separate core immediately
+            shadow = self._launch_shadow(current_task, rob, loop, prediction_future, cancel_event)
             self._metrics["attempts"] += 1
 
-            # Await Phase 1 result (resolves almost instantly — predict() is synchronous)
-            # This yield also lets the shadow task start running
-            shadow_prediction = await prediction_ready
+            # Await Phase 1 signal from shadow (nearly instant — just predict())
+            # Meanwhile shadow's Phase 2 (OPACA I/O) starts on its own core
+            shadow_prediction = await prediction_future
 
-            # Main LLM call — shadow's Phase 2 (invoke) runs concurrently during this
+            # Main LLM call — runs concurrently with shadow's OPACA I/O on separate cores
             worker_message = await self.call_llm(
                 model=config.worker_model,
                 agent="WorkerAgent",
@@ -154,13 +182,12 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
                 tools=worker_agent.tools,
             )
 
-            # MATCH → wait for shadow, commit. MISS → cancel shadow, invoke normally.
             agent_result = await self._run_shadow_and_commit(
-                subtask=current_task,
                 worker_message=worker_message,
                 rob=rob,
-                shadow_task=shadow_task,
+                shadow=shadow,
                 shadow_prediction=shadow_prediction,
+                cancel_event=cancel_event,
                 agent=worker_agent,
                 current_task=current_task,
                 agent_messages=agent_messages,
@@ -257,20 +284,14 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
                 await self.send_status_to_websocket("WorkerAgent", "Executing function calls.\n\n")
 
                 rob = ReorderBuffer()
-                prediction_ready = asyncio.get_running_loop().create_future()
-                shadow_task = asyncio.create_task(
-                    self.speculative_engine.run_speculative(
-                        subtask=task_str,
-                        opaca_client=self.session.opaca_client,
-                        hazard_unit=self.hazard_unit,
-                        predictor=self.predictor,
-                        rob=rob,
-                        prediction_ready=prediction_ready,
-                    )
-                )
+                loop = asyncio.get_running_loop()
+                prediction_future = loop.create_future()
+                cancel_event = threading.Event()
+
+                shadow = self._launch_shadow(task_str, rob, loop, prediction_future, cancel_event)
                 self._metrics["attempts"] += 1
 
-                shadow_prediction = await prediction_ready
+                shadow_prediction = await prediction_future
 
                 worker_message = await self.call_llm(
                     model=config.worker_model,
@@ -283,11 +304,11 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
                 )
 
                 result = await self._run_shadow_and_commit(
-                    subtask=task_str,
                     worker_message=worker_message,
                     rob=rob,
-                    shadow_task=shadow_task,
+                    shadow=shadow,
                     shadow_prediction=shadow_prediction,
+                    cancel_event=cancel_event,
                     agent=agent,
                     current_task=task.task,
                     agent_messages=agent_messages,
