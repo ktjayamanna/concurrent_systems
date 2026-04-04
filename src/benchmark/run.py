@@ -255,7 +255,7 @@ async def parallel_test(question_set: List, llm_url: str, opaca_url: str, method
         # Get default config and overwrite the model
         try:
             config = json.loads((await session.get(llm_url + f'/config/{method}')).content)["config_values"]
-            if method == "self-orchestrated":
+            if method in ("self-orchestrated", "sage++"):
                 config["orchestrator_model"] = model
                 config["worker_model"] = model
                 config["evaluator_model"] = model
