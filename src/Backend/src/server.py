@@ -23,7 +23,7 @@ from .simple import SimpleMethod
 from .simple_tools import SimpleToolsMethod
 from .toolllm import ToolLLMMethod
 from .orchestrated import SelfOrchestratedMethod
-from .sage_plus_plus import SpeculativeSelfOrchestratedMethod
+from .sage_plus_plus.speculative_agent_trio import SpeculativeSelfOrchestratedMethod
 from .internal_tools import InternalTools
 from .file_utils import delete_file_from_all_clients, save_file_to_disk, create_path, delete_file_from_disk, rename_file
 from .session_manager import create_or_refresh_session, cleanup_task, on_shutdown, load_all_sessions, \
