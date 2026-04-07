@@ -167,19 +167,18 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
             shadow = self._launch_shadow(current_task, rob, loop, prediction_future, cancel_event)
             self._metrics["attempts"] += 1
 
-            # Await Phase 1 signal from shadow (nearly instant — just predict())
-            # Meanwhile shadow's Phase 2 (OPACA I/O) starts on its own core
-            shadow_prediction = await prediction_future
-
-            # Main LLM call — runs concurrently with shadow's OPACA I/O on separate cores
-            worker_message = await self.call_llm(
-                model=config.worker_model,
-                agent="WorkerAgent",
-                system_prompt=worker_agent.system_prompt(),
-                messages=worker_agent.messages(subtask),
-                temperature=config.temperature,
-                tool_choice="required",
-                tools=worker_agent.tools,
+            # Start call_llm immediately — predict() and call_llm I/O run on separate cores simultaneously
+            worker_message, shadow_prediction = await asyncio.gather(
+                self.call_llm(
+                    model=config.worker_model,
+                    agent="WorkerAgent",
+                    system_prompt=worker_agent.system_prompt(),
+                    messages=worker_agent.messages(subtask),
+                    temperature=config.temperature,
+                    tool_choice="required",
+                    tools=worker_agent.tools,
+                ),
+                prediction_future,
             )
 
             agent_result = await self._run_shadow_and_commit(
@@ -291,16 +290,18 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
                 shadow = self._launch_shadow(task_str, rob, loop, prediction_future, cancel_event)
                 self._metrics["attempts"] += 1
 
-                shadow_prediction = await prediction_future
-
-                worker_message = await self.call_llm(
-                    model=config.worker_model,
-                    agent="WorkerAgent",
-                    system_prompt=agent.system_prompt(),
-                    messages=agent.messages(task),
-                    temperature=config.temperature,
-                    tool_choice="required",
-                    tools=agent.tools,
+                # Start call_llm immediately — predict() and call_llm I/O run on separate cores simultaneously
+                worker_message, shadow_prediction = await asyncio.gather(
+                    self.call_llm(
+                        model=config.worker_model,
+                        agent="WorkerAgent",
+                        system_prompt=agent.system_prompt(),
+                        messages=agent.messages(task),
+                        temperature=config.temperature,
+                        tool_choice="required",
+                        tools=agent.tools,
+                    ),
+                    prediction_future,
                 )
 
                 result = await self._run_shadow_and_commit(

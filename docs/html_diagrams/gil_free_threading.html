@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SAGE++ — GIL-Free OS Threading</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', sans-serif; background: #0f1117; color: #e0e0e0; padding: 30px; }
+  h1 { font-size: 1.4rem; color: #7eb8f7; margin-bottom: 6px; }
+  .subtitle { font-size: 0.85rem; color: #888; margin-bottom: 24px; line-height: 1.6; }
+
+  .controls { display: flex; gap: 20px; align-items: flex-start; margin-bottom: 20px; flex-wrap: wrap; }
+  .control-group { display: flex; flex-direction: column; gap: 10px; }
+  label { font-size: 0.82rem; color: #aaa; display: flex; align-items: center; gap: 8px; }
+  input[type=range] { accent-color: #7eb8f7; width: 120px; }
+  .val { font-size: 0.82rem; color: #7eb8f7; min-width: 42px; }
+  .slider-group { display: flex; align-items: center; gap: 6px; transition: opacity 0.2s; }
+  .slider-group.dimmed { opacity: 0.3; pointer-events: none; }
+
+  .toggle-row { display: flex; gap: 0; margin-bottom: 28px; }
+  .toggle-btn {
+    padding: 8px 28px; border: 1px solid #3a5fad; cursor: pointer;
+    font-size: 0.88rem; font-weight: 700; transition: all 0.2s;
+    background: #12141c; color: #7eb8f7;
+  }
+  .toggle-btn:first-child { border-radius: 6px 0 0 6px; }
+  .toggle-btn:last-child  { border-radius: 0 6px 6px 0; border-left: none; }
+  .toggle-btn.active { background: #3a5fad; color: #fff; }
+
+  /* ---- Timeline ---- */
+  .timeline-wrap {
+    background: #1a1d27; border-radius: 12px; padding: 28px 24px 20px;
+    border: 1px solid #2a2d3a;
+  }
+
+  .section-label {
+    margin-left: 170px; font-size: 0.7rem; color: #555; letter-spacing: 0.08em;
+    text-transform: uppercase; margin-bottom: 6px; margin-top: 14px;
+  }
+  .section-label:first-child { margin-top: 0; }
+
+  .thread-row { display: flex; align-items: center; margin-bottom: 10px; }
+  .thread-label {
+    width: 170px; font-size: 0.75rem; color: #aaa; text-align: right;
+    padding-right: 14px; flex-shrink: 0; line-height: 1.5;
+  }
+  .thread-label .core-tag {
+    display: inline-block; font-size: 0.62rem; color: #555;
+    background: #1e2030; border: 1px solid #2a2d3a; border-radius: 3px;
+    padding: 1px 5px; margin-top: 3px;
+  }
+  .track {
+    flex: 1; height: 36px; background: #12141c;
+    border-radius: 6px; position: relative; overflow: visible;
+  }
+  .track.signal-track { height: 22px; background: transparent; }
+
+  /* signal arrows row */
+  .signal-row { display: flex; align-items: center; margin-bottom: 10px; position: relative; }
+  .signal-label {
+    width: 170px; font-size: 0.68rem; color: #555; text-align: right;
+    padding-right: 14px; flex-shrink: 0; font-style: italic;
+  }
+  .signal-canvas-wrap { flex: 1; height: 30px; position: relative; }
+  .signal-canvas-wrap canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+
+  .block {
+    position: absolute; height: 100%; border-radius: 5px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.7rem; font-weight: 600; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; padding: 0 6px;
+    cursor: default;
+  }
+  .block:hover { filter: brightness(1.3); }
+
+  /* colours */
+  .predict    { background: #3a5fad; color: #c8dcff; }
+  .invoke-sh  { background: #1e7a5a; color: #a8ffdc; }
+  .await-sig  { background: repeating-linear-gradient(45deg,#2a1e3a,#2a1e3a 4px,#231828 4px,#231828 8px); color: #bb88ff; border: 1px dashed #7a3aad; }
+  .llm        { background: #7a3a8a; color: #f0c8ff; }
+  .compare    { background: #8a6a00; color: #ffe8a0; }
+  .waiting    { background: repeating-linear-gradient(45deg,#1e2030,#1e2030 6px,#23263a 6px,#23263a 12px); color: #666; }
+  .commit     { background: #1e6a7a; color: #a0f0ff; }
+  .invoke-main{ background: #1e5a7a; color: #a0d8ff; }
+  .cancelled  { background: repeating-linear-gradient(45deg,#3a1e1e,#3a1e1e 5px,#2a1515 5px,#2a1515 10px); color: #ff8888; border: 1px dashed #aa3333; }
+  .idle       { background: transparent; color: #333; border: 1px dashed #2a2d3a; font-style: italic; font-size: 0.65rem; }
+
+  .time-axis { display: flex; align-items: flex-start; margin-left: 170px; margin-top: 8px; }
+  .tick-wrap { flex: 1; display: flex; }
+  .tick { flex: 1; text-align: center; font-size: 0.68rem; color: #555; border-left: 1px solid #2a2d3a; padding-top: 4px; }
+
+  .total-bar {
+    margin-left: 170px; margin-top: 18px;
+    background: #12141c; border-radius: 6px; height: 28px;
+    position: relative; overflow: hidden; border: 1px solid #2a2d3a;
+  }
+  .total-fill {
+    position: absolute; left: 0; top: 0; height: 100%;
+    border-radius: 6px; display: flex; align-items: center;
+    padding-left: 10px; font-size: 0.74rem; font-weight: 700; color: #fff;
+    transition: width 0.35s ease;
+  }
+  .fill-match    { background: linear-gradient(90deg, #3a5fad, #1e7a5a); }
+  .fill-mismatch { background: linear-gradient(90deg, #7a3a8a, #1e5a7a); }
+
+  .legend {
+    display: flex; gap: 14px; flex-wrap: wrap; margin-top: 22px;
+    padding-top: 16px; border-top: 1px solid #2a2d3a;
+  }
+  .leg-item { display: flex; align-items: center; gap: 7px; font-size: 0.74rem; color: #aaa; }
+  .leg-box { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; }
+
+  .info-box {
+    margin-top: 20px; padding: 14px 18px;
+    border-left: 3px solid #7eb8f7; border-radius: 4px;
+    font-size: 0.78rem; color: #aaa; line-height: 1.9;
+    background: #1a2535;
+  }
+  .info-box strong { color: #7eb8f7; }
+  .green { color: #88ffbb; font-weight: 700; }
+  .red   { color: #ff8888; font-weight: 700; }
+  .purple { color: #cc99ff; font-weight: 700; }
+  .yellow { color: #ffdd88; font-weight: 700; }
+
+  /* phase annotation */
+  .phase-strip {
+    margin-left: 170px; display: flex; height: 20px; margin-bottom: 4px; position: relative;
+  }
+  .phase-block {
+    position: absolute; height: 100%; display: flex; align-items: center;
+    justify-content: center; font-size: 0.62rem; font-weight: 700;
+    letter-spacing: 0.08em; border-radius: 3px; color: #888;
+    border: 1px solid #2a2d3a; background: #161820;
+  }
+
+  .tooltip {
+    position: fixed; background: #2a2d3a; border: 1px solid #444;
+    border-radius: 8px; padding: 10px 14px; font-size: 0.78rem;
+    color: #e0e0e0; pointer-events: none; z-index: 100;
+    max-width: 280px; line-height: 1.5; display: none;
+  }
+
+  .rob-box {
+    margin-left: 170px; margin-top: 12px;
+    background: #16181f; border: 1px solid #2a3a2a; border-radius: 8px;
+    padding: 10px 14px; font-size: 0.76rem; color: #aaa;
+    display: flex; align-items: center; gap: 14px;
+  }
+  .rob-icon { font-size: 0.7rem; font-weight: 700; color: #88ffbb; background: #1e3028; border-radius: 4px; padding: 3px 7px; }
+  .rob-status { font-size: 0.76rem; }
+  .rob-status span { color: #88ffbb; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>SAGE++ — GIL-Free OS Threading (Python 3.14)</h1>
+<p class="subtitle">
+  Shadow OS thread runs <code>predict()</code> on Core 2 while main asyncio coroutine awaits the <code>prediction_future</code>.<br>
+  Once the tool name is signalled via <code>loop.call_soon_threadsafe()</code>, main starts <code>call_llm()</code> while shadow concurrently invokes OPACA — <strong>true CPU parallelism, no GIL</strong>.
+</p>
+
+<div class="controls">
+  <div class="control-group">
+    <label>predict() latency &nbsp;<input type="range" id="sPredict" min="20" max="500" value="80"> <span class="val" id="sPredictVal">80</span>ms</label>
+    <label>invoke_opaca (shadow) <input type="range" id="sInvoke"  min="300" max="4000" value="2000"> <span class="val" id="sInvokeVal">2000</span>ms</label>
+  </div>
+  <div class="control-group">
+    <label>call_llm() latency &nbsp;<input type="range" id="mLLM" min="300" max="4000" value="1500"> <span class="val" id="mLLMVal">1500</span>ms</label>
+    <span class="slider-group" id="mInvokeGroup">
+      <label>invoke_tools (main fallback) <input type="range" id="mInvoke" min="300" max="4000" value="1800"> <span class="val" id="mInvokeVal">1800</span>ms</label>
+    </span>
+  </div>
+</div>
+
+<div class="toggle-row">
+  <button class="toggle-btn active" id="btnMatch" onclick="setMode('match')">✓ MATCH — speculative hit</button>
+  <button class="toggle-btn" id="btnMiss"  onclick="setMode('miss')">✗ MISMATCH — speculative miss</button>
+</div>
+
+<div class="timeline-wrap">
+
+  <!-- Phase annotation strip -->
+  <div class="phase-strip" id="phaseStrip"></div>
+
+  <p class="section-label">Core 2 — Shadow OS Thread (threading.Thread, daemon=True)</p>
+
+  <div class="thread-row">
+    <div class="thread-label">
+      Shadow<br>
+      <span class="core-tag">threading.Thread</span>
+    </div>
+    <div class="track" id="shadowTrack"></div>
+  </div>
+
+  <!-- Signal row -->
+  <div class="signal-row">
+    <div class="signal-label">loop.call_soon_threadsafe()</div>
+    <div class="signal-canvas-wrap">
+      <canvas id="signalCanvas"></canvas>
+    </div>
+  </div>
+
+  <p class="section-label">Core 1 — Main asyncio Coroutine (event loop)</p>
+
+  <div class="thread-row">
+    <div class="thread-label">
+      Main<br>
+      <span class="core-tag">asyncio coroutine</span>
+    </div>
+    <div class="track" id="mainTrack"></div>
+  </div>
+
+  <div class="time-axis"><div class="tick-wrap" id="ticks"></div></div>
+
+  <!-- ROB status -->
+  <div class="rob-box" id="robBox"></div>
+
+  <div class="total-bar"><div class="total-fill" id="totalFill"></div></div>
+
+  <div class="legend">
+    <div class="leg-item"><div class="leg-box predict"></div>predict() — Rabia's model</div>
+    <div class="leg-item"><div class="leg-box invoke-sh"></div>invoke_opaca (httpx sync, shadow)</div>
+    <div class="leg-item"><div class="leg-box await-sig"></div>await prediction_future</div>
+    <div class="leg-item"><div class="leg-box llm"></div>call_llm() — OpenAI API</div>
+    <div class="leg-item"><div class="leg-box compare"></div>compare tool names</div>
+    <div class="leg-item"><div class="leg-box waiting"></div>await shadow.join()</div>
+    <div class="leg-item"><div class="leg-box commit"></div>rob.commit()</div>
+    <div class="leg-item"><div class="leg-box invoke-main"></div>invoke_tools (main fallback)</div>
+    <div class="leg-item"><div class="leg-box cancelled"></div>cancel_event.set() → discarded</div>
+  </div>
+</div>
+
+<div class="info-box" id="infoBox"></div>
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+let mode = 'match';
+
+const sliders = {
+  sPredict: 'sPredictVal', sInvoke: 'sInvokeVal',
+  mLLM: 'mLLMVal', mInvoke: 'mInvokeVal'
+};
+Object.keys(sliders).forEach(k => {
+  document.getElementById(k).oninput = () => {
+    document.getElementById(sliders[k]).textContent = document.getElementById(k).value;
+    draw();
+  };
+});
+
+function setMode(m) {
+  mode = m;
+  document.getElementById('btnMatch').classList.toggle('active', m === 'match');
+  document.getElementById('btnMiss').classList.toggle('active',  m === 'miss');
+  document.getElementById('mInvokeGroup').classList.toggle('dimmed', m === 'match');
+  draw();
+}
+
+function draw() {
+  const sp = +document.getElementById('sPredict').value;
+  const si = +document.getElementById('sInvoke').value;
+  const ml = +document.getElementById('mLLM').value;
+  const mi = +document.getElementById('mInvoke').value;
+
+  // Timeline events
+  // t=0:  shadow starts predict(), main starts awaiting prediction_future
+  // t=sp: shadow signals loop via call_soon_threadsafe → main resumes
+  //       shadow starts Phase 2 (httpx invoke)
+  //       main starts call_llm()
+  // t=sp+ml: main receives LLM result
+  // t=sp+ml+20: compare done
+  const awaitEnd   = sp;           // main stops waiting for future
+  const llmStart   = sp;           // call_llm() starts as soon as prediction signal arrives
+  const llmEnd     = sp + ml;
+  const compareEnd = llmEnd + 20;
+  const shadowDone = sp + si;      // shadow finishes invoke_opaca
+
+  let shadowBlocks, mainBlocks, total, fillClass, labelText, infoHtml, robHtml;
+
+  if (mode === 'match') {
+    // MATCH: main waits for shadow to finish, then commits from ROB
+    const waitEnd   = Math.max(compareEnd, shadowDone);
+    const commitEnd = waitEnd + 30;
+    total = commitEnd;
+
+    shadowBlocks = [
+      { cls: 'predict',   start: 0,  end: sp,         label: `predict()  ${sp}ms`,
+        tip: 'Phase 1: Rabia\'s predictor runs on Core 2. No GIL contention — this core is free to run at full speed.' },
+      { cls: 'invoke-sh', start: sp, end: shadowDone,  label: `httpx invoke_opaca  ${si}ms`,
+        tip: 'Phase 2: synchronous httpx.Client().post() to OPACA runtime. Runs concurrently with call_llm() on Core 1 — true CPU+I/O parallelism.' },
+    ];
+
+    mainBlocks = [
+      { cls: 'await-sig', start: 0,           end: awaitEnd,   label: `await future  ${sp}ms`,
+        tip: 'Main coroutine suspends on `await prediction_future`. Event loop is free. This tiny wait (predict() latency) is the only penalty on main\'s critical path.' },
+      { cls: 'llm',       start: llmStart,     end: llmEnd,     label: `call_llm()  ${ml}ms`,
+        tip: 'OpenAI API call. Starts the instant shadow signals the prediction name — no extra delay. Runs truly in parallel with shadow\'s OPACA invocation on Core 2.' },
+      { cls: 'compare',   start: llmEnd,       end: compareEnd, label: 'compare',
+        tip: 'shadow_prediction == actual_tool? MATCH — tool names agree.' },
+      ...(shadowDone > compareEnd
+        ? [{ cls: 'waiting', start: compareEnd, end: shadowDone,
+             label: `await shadow.join()  ${shadowDone - compareEnd}ms`,
+             tip: 'Names match but shadow\'s OPACA call is still in-flight. Main awaits via run_in_executor(None, shadow.join) — event loop is not blocked.' }]
+        : []),
+      { cls: 'commit',    start: waitEnd,      end: commitEnd,  label: 'rob.commit()',
+        tip: 'Shadow stored its result in the ReorderBuffer. Main commits it — invoke_tools() is SKIPPED entirely.' },
+    ];
+
+    const seqBaseline = ml + 20 + si + 30; // what SAGE would do: call_llm + compare + invoke + commit
+    const saved = seqBaseline - (commitEnd - sp);
+    fillClass = 'fill-match';
+    labelText  = `✓ MATCH total: ${commitEnd}ms  |  Sequential baseline: ~${seqBaseline + sp}ms  |  Saved ≈ ${Math.max(0, seqBaseline - commitEnd + sp)}ms`;
+    robHtml    = `<span class="rob-icon">ROB</span> <span class="rob-status">shadow stored result → <span>rob.commit()</span> → injected into tool_calls — invoke_tools() skipped</span>`;
+    infoHtml   = `
+      <strong>MATCH path — how it works:</strong><br>
+      <span class="purple">Phase 1</span>: Shadow <code>predict()</code> runs on Core 2. Main suspends on <code>await prediction_future</code> for <strong>${sp}ms</strong>.<br>
+      <span class="green">Signal</span>: Shadow calls <code>loop.call_soon_threadsafe(future.set_result, "${sp}ms tool name")</code> — safe bridge from OS thread to asyncio.<br>
+      <span class="purple">Phase 2</span>: Shadow starts <code>httpx.Client().post()</code> while main starts <code>call_llm()</code> — <span class="green">truly parallel on separate cores</span>.<br>
+      <span class="yellow">Compare</span>: <code>shadow_prediction == actual_tool</code> → MATCH. Main calls <code>shadow.join()</code> (via <code>run_in_executor</code>) to wait for the ROB result.<br>
+      <span class="green">Commit</span>: <code>rob.commit()</code> injects the speculative result — <code>invoke_tools()</code> never called.
+      ${shadowDone <= compareEnd
+        ? `<br><span class="green">Zero wait</span>: Shadow finished before LLM returned — maximum overlap, no stall.`
+        : `<br>Shadow took <strong>${shadowDone - compareEnd}ms</strong> longer than call_llm — main stalls that amount. Still faster than sequential.`}
+    `;
+  } else {
+    // MISMATCH: cancel_event.set(), main runs invoke_tools normally
+    const invokeEnd = compareEnd + mi;
+    total = invokeEnd;
+
+    // Shadow may still be invoking when cancel fires — it finishes in background then discards
+    const shadowCancelAt = compareEnd;
+
+    shadowBlocks = [
+      { cls: 'predict',   start: 0,               end: sp,               label: `predict()  ${sp}ms`,
+        tip: 'Shadow predicts on Core 2. Result will turn out to be wrong.' },
+      { cls: 'invoke-sh', start: sp,               end: Math.min(shadowDone, shadowCancelAt), label: `httpx invoke_opaca...`,
+        tip: 'Shadow begins OPACA call for the wrong tool. Cannot be interrupted mid-flight.' },
+      { cls: 'cancelled', start: Math.min(shadowDone, shadowCancelAt), end: Math.max(shadowDone, shadowCancelAt),
+        label: `cancel_event set ✗`,
+        tip: 'cancel_event.set() fired by main at compare time. Shadow checks cancel_event.is_set() after HTTP returns and skips rob.store() — result discarded.' },
+    ];
+
+    mainBlocks = [
+      { cls: 'await-sig',  start: 0,           end: awaitEnd,   label: `await future  ${sp}ms`,
+        tip: 'Main suspends waiting for shadow\'s prediction name. Only penalty from predict() latency.' },
+      { cls: 'llm',        start: llmStart,     end: llmEnd,     label: `call_llm()  ${ml}ms`,
+        tip: 'LLM call. Starts at t=sp, runs in parallel with shadow\'s (wrong) OPACA invocation.' },
+      { cls: 'compare',    start: llmEnd,       end: compareEnd, label: 'compare',
+        tip: 'shadow_prediction ≠ actual_tool → MISMATCH. Set cancel_event, flush ROB.' },
+      { cls: 'invoke-main',start: compareEnd,   end: invokeEnd,  label: `invoke_tools()  ${mi}ms`,
+        tip: 'Main runs invoke_tools() normally for the correct tool. Shadow result is discarded.' },
+    ];
+
+    const seqBaseline = ml + 20 + mi;
+    const extra = sp; // only penalty: predict() latency on main's critical path
+    fillClass = 'fill-mismatch';
+    labelText  = `✗ MISMATCH total: ${invokeEnd}ms  |  Non-speculative SAGE: ${seqBaseline}ms  |  Extra cost: ${extra}ms (predict latency)`;
+    robHtml    = `<span class="rob-icon">ROB</span> <span class="rob-status"><span style="color:#ff8888">rob.flush()</span> → ROB cleared. Shadow result discarded when cancel_event detected.</span>`;
+    infoHtml   = `
+      <strong>MISMATCH path — how it works:</strong><br>
+      <span class="purple">Phase 1</span>: Shadow predicts wrong tool (${sp}ms). Main was blocked on <code>await prediction_future</code> during this time.<br>
+      <span class="purple">Phase 2</span>: Shadow invokes OPACA for the wrong tool — <em>cannot be interrupted mid-HTTP</em>. Runs to completion in background as daemon thread.<br>
+      <span class="yellow">Compare</span>: <code>shadow_prediction ≠ actual_tool</code>. Main calls <code>cancel_event.set()</code> and <code>rob.flush()</code>.<br>
+      <span class="red">Cancel</span>: Shadow checks <code>cancel_event.is_set()</code> after HTTP returns → skips <code>rob.store()</code>, exits silently.<br>
+      <span class="red">Penalty</span>: <strong>${extra}ms</strong> extra vs non-speculative SAGE — just the predict() latency on main's critical path.<br>
+      Since predict() is a fast local model (${sp}ms), MISMATCH overhead is negligible.
+    `;
+  }
+
+  renderTrack('shadowTrack', shadowBlocks, total);
+  renderTrack('mainTrack',   mainBlocks,   total);
+  renderPhaseStrip(sp, total);
+  renderSignalArrow(sp, total);
+  renderTicks(total);
+
+  const fill = document.getElementById('totalFill');
+  fill.className = 'total-fill ' + fillClass;
+  fill.style.width = '100%';
+  fill.textContent = labelText;
+  document.getElementById('infoBox').innerHTML = infoHtml;
+  document.getElementById('robBox').innerHTML  = robHtml;
+}
+
+function renderPhaseStrip(sp, total) {
+  const strip = document.getElementById('phaseStrip');
+  strip.style.position = 'relative';
+  strip.innerHTML = '';
+
+  function addPhase(start, end, label, color) {
+    const d = document.createElement('div');
+    d.className = 'phase-block';
+    d.style.left  = (start / total * 100) + '%';
+    d.style.width = ((end - start) / total * 100) + '%';
+    d.style.color = color;
+    d.style.borderColor = color + '44';
+    d.textContent = label;
+    strip.appendChild(d);
+  }
+
+  addPhase(0, sp, 'PHASE 1 — predict()', '#bb88ff');
+  addPhase(sp, total, 'PHASE 2 — parallel I/O', '#88ffbb');
+}
+
+function renderSignalArrow(sp, total) {
+  const canvas = document.getElementById('signalCanvas');
+  const wrap = canvas.parentElement;
+  const W = wrap.clientWidth || 600;
+  const H = 30;
+  canvas.width  = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+
+  const x = sp / total * W;
+  ctx.strokeStyle = '#7a3aad';
+  ctx.lineWidth   = 1.5;
+  ctx.setLineDash([4, 3]);
+  ctx.beginPath();
+  ctx.moveTo(x, 2);
+  ctx.lineTo(x, H - 6);
+  ctx.stroke();
+
+  // arrowhead pointing down (toward main track)
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#7a3aad';
+  ctx.beginPath();
+  ctx.moveTo(x, H - 2);
+  ctx.lineTo(x - 5, H - 10);
+  ctx.lineTo(x + 5, H - 10);
+  ctx.closePath();
+  ctx.fill();
+
+  // label
+  ctx.fillStyle = '#7a3aad';
+  ctx.font = '10px Segoe UI';
+  ctx.fillText('call_soon_threadsafe()', x + 7, 14);
+}
+
+function renderTrack(id, blocks, total) {
+  const track = document.getElementById(id);
+  track.innerHTML = '';
+  blocks.forEach(b => {
+    if (b.start >= b.end) return;
+    const div = document.createElement('div');
+    div.className = 'block ' + b.cls;
+    div.style.left  = (b.start / total * 100) + '%';
+    div.style.width = ((b.end - b.start) / total * 100) + '%';
+    div.textContent = b.label;
+    div.onmouseenter = e => showTip(e, b.tip);
+    div.onmousemove  = e => moveTip(e);
+    div.onmouseleave = () => hideTip();
+    track.appendChild(div);
+  });
+}
+
+function renderTicks(total) {
+  const c = document.getElementById('ticks');
+  c.innerHTML = '';
+  const step = total < 1000 ? 100 : total < 3000 ? 500 : total < 7000 ? 1000 : 2000;
+  for (let i = 0; i * step <= total + step; i++) {
+    const d = document.createElement('div');
+    d.className = 'tick';
+    d.textContent = (i * step) + 'ms';
+    d.style.flex = step;
+    c.appendChild(d);
+  }
+}
+
+function showTip(e, t) {
+  const el = document.getElementById('tooltip');
+  el.textContent = t; el.style.display = 'block'; moveTip(e);
+}
+function moveTip(e) {
+  const el = document.getElementById('tooltip');
+  el.style.left = (e.clientX + 14) + 'px';
+  el.style.top  = (e.clientY + 14) + 'px';
+}
+function hideTip() { document.getElementById('tooltip').style.display = 'none'; }
+
+// Redraw signal arrow on resize
+window.addEventListener('resize', draw);
+
+document.getElementById('mInvokeGroup').classList.add('dimmed');
+draw();
+</script>
+</body>
+</html>
