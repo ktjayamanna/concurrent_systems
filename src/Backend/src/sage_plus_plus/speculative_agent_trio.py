@@ -26,7 +26,7 @@ from ..models import QueryResponse, Chat, AgentMessage, ToolCall
 
 from .speculative_engine import SpeculativeExecutionEngine
 from .reorder_buffer import ReorderBuffer
-from .predictor.algorithms import DummyPredictor
+from .predictor.algorithms import DummyPredictor, HabitPredictor
 from .hazard_detection import HazardDetectionUnit
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,8 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.speculative_engine = SpeculativeExecutionEngine()
-        self.predictor = DummyPredictor()
+        #self.predictor = DummyPredictor()
+        self.predictor = HabitPredictor()
         self.hazard_unit = HazardDetectionUnit()
         self._metrics: dict = {"attempts": 0, "hits": 0, "misses": 0}
 
