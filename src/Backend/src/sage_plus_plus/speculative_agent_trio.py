@@ -26,7 +26,7 @@ from ..models import QueryResponse, Chat, AgentMessage, ToolCall
 
 from .speculative_engine import SpeculativeExecutionEngine
 from .reorder_buffer import ReorderBuffer
-from .predictor.algorithms import DummyPredictor, HabitPredictor
+from .predictor.algorithms import DummyPredictor, HabitPredictor, NaiveBayesPredictor, SmallLLMPredictor
 from .hazard_detection import HazardDetectionUnit
 
 logger = logging.getLogger(__name__)
@@ -102,8 +102,8 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
         Given the main thread's LLM result and shadow's predicted name,
         either commit the speculative result (MATCH) or cancel and invoke normally (MISS).
         """
-        actual_tool = worker_message.tools[0].name if worker_message.tools else None
-
+        actual_tool = worker_message.tools[0].name if worker_message.tools else None # SAGE result used as groundtruth
+        # shadow_prediction is the predicted result from sage++
         if shadow_prediction and actual_tool and shadow_prediction == actual_tool:
             # MATCH — wait for shadow thread to finish its OPACA invocation
             await asyncio.get_running_loop().run_in_executor(
