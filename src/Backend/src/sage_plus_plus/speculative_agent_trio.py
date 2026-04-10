@@ -104,7 +104,9 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
         actual_tool = worker_message.tools[0].name if worker_message.tools else None # SAGE result used as groundtruth
         # shadow_prediction is the predicted result from sage++
         if shadow_prediction and actual_tool and shadow_prediction == actual_tool:
-            # MATCH — wait for shadow thread to finish its OPACA invocation
+            # If the shadow prediction matched the LLM’s tool choice, 
+            # wait (without blocking the event loop) for the shadow thread
+            # to finish its speculative OPACA invocation, but only up to the timeout.
             await asyncio.get_running_loop().run_in_executor(
                 None, shadow.join, self.speculative_engine.timeout
             )
@@ -114,6 +116,11 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
             if speculative_result is not None and not self._is_error_result(speculative_result):
                 # HIT — inject result, skip invoke_tools entirely
                 self._metrics["hits"] += 1
+                # call_llm(...) was supposed to return the LLM’s decision as an AgentMessage. 
+                # That message already contains a ToolCall object in worker_message.tools[0], 
+                # but without a result yet. self.invoke_tools(...) then executes that tool call 
+                # and fills in the result (it usually returns an AgentResult)
+                # below we artificially make that tool call with the speculative result.
                 worker_message.tools[0] = ToolCall(
                     id=worker_message.tools[0].id,
                     type="opaca",
@@ -121,11 +128,13 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
                     args=worker_message.tools[0].args,
                     result=speculative_result,
                 )
-                agent_messages.append(AgentMessage(agent="WorkerAgent (speculative hit)", execution_time=0))
+                agent_messages.append(AgentMessage(agent="WorkerAgent (shadow)", execution_time=0))
+                # Once we updated worker_message.tools[0], we wrap if with AgentResult
+                # to fool the system to think it's the return call from invoke_tools()
                 return AgentResult(
                     agent_name=agent.agent_name,
                     task=current_task,
-                    output=f"- Worker Agent Executed (speculative): {actual_tool}.",
+                    output=f"- Worker Agent Executed: {actual_tool}.",
                     tool_calls=worker_message.tools,
                 )
 
