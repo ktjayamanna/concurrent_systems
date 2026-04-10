@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>SAGE Class Design</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f0f2f5;
+      padding: 32px;
+      color: #1a1a2e;
+    }
+    h1 {
+      font-size: 1.4rem;
+      font-weight: 600;
+      margin-bottom: 8px;
+      color: #1a1a2e;
+    }
+    .subtitle {
+      font-size: 0.85rem;
+      color: #6c757d;
+      margin-bottom: 24px;
+    }
+    .card {
+      background: #ffffff;
+      border-radius: 12px;
+      padding: 32px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+    }
+    .legend {
+      display: flex;
+      gap: 24px;
+      flex-wrap: wrap;
+      margin-top: 28px;
+      padding-top: 20px;
+      border-top: 1px solid #e9ecef;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.8rem;
+      color: #495057;
+    }
+    .legend-swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 3px;
+      border: 1px solid rgba(0,0,0,0.15);
+    }
+    .mermaid { display: flex; justify-content: center; }
+  </style>
+</head>
+<body>
+  <h1>SAGE Class Interaction Diagram</h1>
+  <p class="subtitle">Shows ownership, delegation, and runtime data flow between all classes.</p>
+
+  <div class="card">
+    <div class="mermaid">
+flowchart TD
+
+  %% ── External ─────────────────────────────────────────────────────────
+  AM["AbstractMethod<br/><i>(base class)</i>"]:::external
+  OPACA["OPACA Interface<br/><i>(external dispatch)</i>"]:::external
+
+  %% ── Entry point ──────────────────────────────────────────────────────
+  SOM["<b>SelfOrchestratedMethod</b><br/>─────────────────────<br/>config: OrchestrationConfig<br/>─────────────────────<br/>query()<br/>_execute_round()<br/>invoke_tools()<br/>get_agent_details()"]:::core
+
+  CFG["<b>OrchestrationConfig</b><br/>─────────────────────<br/>orchestrator_model<br/>worker_model · evaluator_model<br/>generator_model · temperature<br/>max_rounds · max_iterations<br/>use_agent_planner<br/>use_agent_evaluator"]:::model
+
+  %% ── Agent base ───────────────────────────────────────────────────────
+  BA["<b>BaseAgent</b><br/>─────────────────────<br/>chat_history<br/>─────────────────────<br/>system_prompt()<br/>messages()"]:::agent
+
+  %% ── Agent classes ────────────────────────────────────────────────────
+  ORC["<b>OrchestratorAgent</b><br/>─────────────────────<br/>chat_history · tools<br/>─────────────────────<br/>system_prompt()<br/>messages()<br/>schema → OrchestratorPlan"]:::agent
+
+  PLN["<b>AgentPlanner</b><br/>─────────────────────<br/>agent_name · tools<br/>worker_agent · config<br/>─────────────────────<br/>system_prompt() · messages()<br/>get_orchestrator_context()<br/>schema → PlannerPlan"]:::agent
+
+  WRK["<b>WorkerAgent</b><br/>─────────────────────<br/>agent_name · summary · tools<br/>─────────────────────<br/>system_prompt() · messages()"]:::agent
+
+  AEV["<b>AgentEvaluator</b><br/>─────────────────────<br/>─────────────────────<br/>system_prompt() · messages()<br/>has_error() · schema → AgentEvaluation"]:::agent
+
+  OEV["<b>OverallEvaluator</b><br/>─────────────────────<br/>─────────────────────<br/>system_prompt() · messages()<br/>has_error() · schema → AgentEvaluation"]:::agent
+
+  IA["<b>IterationAdvisor</b><br/>─────────────────────<br/>─────────────────────<br/>system_prompt() · messages()<br/>schema → IterationAdvice"]:::agent
+
+  %% ── Data models ──────────────────────────────────────────────────────
+  subgraph models["Data Models"]
+    AT["<b>AgentTask</b><br/>agent_name · task<br/>round · dependencies"]:::model
+    OP["<b>OrchestratorPlan</b><br/>tasks: List[AgentTask]"]:::model
+    PP["<b>PlannerPlan</b><br/>thinking · tasks: List[AgentTask]"]:::model
+    AR["<b>AgentResult</b><br/>agent_name · task<br/>output · tool_calls"]:::model
+    AEval["<b>AgentEvaluation</b><br/>reiterate: bool"]:::model
+    IAd["<b>IterationAdvice</b><br/>issues · improvement_steps<br/>context_summary · should_retry<br/>needs_follow_up · follow_up_question"]:::model
+  end
+
+  %% ── Inheritance ──────────────────────────────────────────────────────
+  AM    -. "extends" .-> SOM
+  BA    -. "extends" .-> ORC
+  BA    -. "extends" .-> PLN
+  BA    -. "extends" .-> WRK
+  BA    -. "extends" .-> AEV
+  BA    -. "extends" .-> OEV
+  BA    -. "extends" .-> IA
+
+  %% ── Ownership / data flow ────────────────────────────────────────────
+  SOM -- "reads" --> CFG
+  SOM -- "creates & drives" --> ORC
+  SOM -- "creates per agent" --> WRK
+  SOM -- "creates (optional)" --> AEV
+  SOM -- "creates" --> OEV
+  SOM -- "creates" --> IA
+
+  WRK -- "creates (optional)" --> PLN
+
+  ORC -- "produces" --> OP
+  OP  -- "contains" --> AT
+  PLN -- "produces" --> PP
+  PP  -- "contains" --> AT
+
+  WRK -- "call_llm → invoke_tools" --> OPACA
+  OPACA -- "tool results" --> AR
+
+  AEV -- "produces" --> AEval
+  OEV -- "produces" --> AEval
+  IA  -- "produces" --> IAd
+
+  %% ── Styles ───────────────────────────────────────────────────────────
+  classDef external fill:#e9ecef,stroke:#adb5bd,color:#495057
+  classDef core      fill:#4263eb,stroke:#3b5bdb,color:#ffffff
+  classDef agent     fill:#0ca678,stroke:#099268,color:#ffffff
+  classDef model     fill:#74c0fc,stroke:#339af0,color:#1c3d6b
+
+    </div>
+
+    <div class="legend">
+      <div class="legend-item">
+        <div class="legend-swatch" style="background:#4263eb;border-color:#3b5bdb;"></div>
+        Entry point / orchestration
+      </div>
+      <div class="legend-item">
+        <div class="legend-swatch" style="background:#0ca678;border-color:#099268;"></div>
+        Agent classes
+      </div>
+      <div class="legend-item">
+        <div class="legend-swatch" style="background:#74c0fc;border-color:#339af0;"></div>
+        Data models
+      </div>
+      <div class="legend-item">
+        <div class="legend-swatch" style="background:#e9ecef;border-color:#adb5bd;"></div>
+        External / base classes
+      </div>
+      <div class="legend-item" style="margin-left:8px;">
+        <span style="font-size:1rem;">───</span>&nbsp;ownership / data flow
+      </div>
+      <div class="legend-item">
+        <span style="font-size:1rem; letter-spacing:-2px;">─ ─</span>&nbsp;inheritance
+      </div>
+    </div>
+  </div>
+
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'base',
+      themeVariables: {
+        primaryColor: '#4263eb',
+        primaryTextColor: '#fff',
+        primaryBorderColor: '#3b5bdb',
+        lineColor: '#495057',
+        fontSize: '13px'
+      },
+      flowchart: { curve: 'basis', padding: 20 }
+    });
+  </script>
+</body>
+</html>

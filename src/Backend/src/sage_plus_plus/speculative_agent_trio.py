@@ -155,7 +155,10 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
             all_results: List[AgentResult],
             agent_messages: List[AgentMessage],
     ) -> List[AgentResult]:
-        """Speculative version of _execute_round using GIL-free OS threads."""
+        """
+            Speculative version of _execute_round that polymorphically overrides self._execute_round
+            at orchestrated_method.py to run true parallel speculative execution using GIL-free OS threads.
+        """
 
         agent_evaluator = AgentEvaluator() if config.use_agent_evaluator else None
 
@@ -168,8 +171,8 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
             current_task = f"{subtask.task}\n\n{orchestrator_context}\n{round_context}"
 
             rob = ReorderBuffer()
-            loop = asyncio.get_running_loop()
-            prediction_future = loop.create_future()
+            loop = asyncio.get_running_loop() # get the event loop
+            prediction_future = loop.create_future() # gather() wait for this future to be resolved instead of monitoring the shadow thread constantly.
             cancel_event = threading.Event()
 
             # Launch shadow OS thread — runs predict() on a separate core immediately
@@ -209,7 +212,9 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
             task_str = task.task if isinstance(task, AgentTask) else task
 
             logger.info(f"Executing task for {task.agent_name}: {task_str}")
-
+            
+            # GeneralAgent is a dumb agent that does not do any llm inferencing.
+            # It just returns a pre-defined response about the system capabilities.
             if agent.agent_name == "GeneralAgent":
                 predefined_response = get_current_time() + BACKGROUND_INFO + GENERAL_CAPABILITIES_RESPONSE.format(
                     agent_capabilities=json.dumps(await self.get_agent_details(), indent=2))
