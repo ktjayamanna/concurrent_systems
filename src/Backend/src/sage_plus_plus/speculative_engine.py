@@ -82,7 +82,7 @@ class SpeculativeExecutionEngine:
             agent_path = f"/{agent_name}" if agent_name else ""
             url = f"{opaca_client.url}/invoke/{action_name}{agent_path}"
 
-            with httpx.Client() as client:
+            with httpx.Client() as client: # blocks the shadow thread
                 response = client.post(
                     url,
                     json={},
