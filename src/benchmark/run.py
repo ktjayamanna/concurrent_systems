@@ -55,6 +55,7 @@ def parse_arguments():
     parser.add_argument("-c", "--chunks", type=int, default=5, help="The number of chunks the question set will be split into and evaluated in parallel.")
     parser.add_argument("-j", "--judge", action=argparse.BooleanOptionalAction, help="Whether the Judge LLM should be used for evaluation.")
     parser.add_argument("-p", "--portion", type=int, default=100, help="The portion of the question set that should be evaluated in percentage.")
+    parser.add_argument("--predictor-type", type=str, default=None, choices=["habit", "dummy", "naive-bayes", "small-llm"], help="SAGE++ predictor type to use (only applies to method 'sage++').")
     parser.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Set the logging level.")
     parser.add_argument("--out", type=str, default="", help="The output file where the results should be written.")
     return parser.parse_args()
@@ -241,7 +242,7 @@ def _extract_speculation_flag(result: Dict[str, Any]) -> Optional[bool]:
     return None
 
 
-async def parallel_test(question_set: List, llm_url: str, opaca_url: str, method: str, model: str, use_judge: bool, progress: Progress, task_id: TaskID):
+async def parallel_test(question_set: List, llm_url: str, opaca_url: str, method: str, model: str, use_judge: bool, predictor_type: Optional[str], progress: Progress, task_id: TaskID):
     # Create a unique session for requests
     async with httpx.AsyncClient(http2=False, limits=httpx.Limits(max_connections=1), headers={"Connection": "close"}) as session:
 
@@ -260,6 +261,8 @@ async def parallel_test(question_set: List, llm_url: str, opaca_url: str, method
                 config["worker_model"] = model
                 config["evaluator_model"] = model
                 config["generator_model"] = model
+                if method == "sage++" and predictor_type:
+                    config["predictor_type"] = predictor_type
             elif method == "tool-llm":
                 config["tool_gen_model"] = model
                 config["tool_eval_model"] = model
@@ -437,6 +440,7 @@ async def main():
     use_judge = args.judge
     portion = args.portion
     out_file = args.out
+    predictor_type = args.predictor_type
     # Set the logging level
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
@@ -503,7 +507,7 @@ async def main():
             tasks = [progress.add_task(f'Chunk-{i}', total=len(data)) for i, data in enumerate(chunks)]
 
             # Execute Tests and combine results
-            q_results = await asyncio.gather(*(parallel_test(chunks[j], llm_url, opaca_url, method, model, use_judge, progress, task_id) for task_id, j in zip(tasks, range(len(chunks)))))
+            q_results = await asyncio.gather(*(parallel_test(chunks[j], llm_url, opaca_url, method, model, use_judge, predictor_type, progress, task_id) for task_id, j in zip(tasks, range(len(chunks)))))
             q_results = flatten(q_results)
 
             # Init benchmark values

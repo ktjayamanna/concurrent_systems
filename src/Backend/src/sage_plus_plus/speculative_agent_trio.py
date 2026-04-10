@@ -22,7 +22,7 @@ from ..orchestrated.orchestrated_routes import OrchestrationConfig
 from ..orchestrated.agents import AgentEvaluator, AgentPlanner, get_current_time
 from ..orchestrated.models import AgentResult, AgentTask
 from ..orchestrated.prompts import BACKGROUND_INFO, GENERAL_CAPABILITIES_RESPONSE
-from ..models import QueryResponse, Chat, AgentMessage, ToolCall
+from ..models import QueryResponse, Chat, AgentMessage, ToolCall, MethodConfig
 
 from .speculative_engine import SpeculativeExecutionEngine
 from .reorder_buffer import ReorderBuffer
@@ -30,6 +30,15 @@ from .predictor.algorithms import DummyPredictor, HabitPredictor, NaiveBayesPred
 from .hazard_detection import HazardDetectionUnit
 
 logger = logging.getLogger(__name__)
+
+class SpeculativeOrchestrationConfig(OrchestrationConfig):
+    predictor_type: str = MethodConfig.string(
+        default="habit",
+        options=["habit", "dummy", "naive-bayes", "small-llm"],
+        allow_free_input=False,
+        title="Predictor Type",
+        description="Tool predictor used for speculative execution.",
+    )
 
 
 class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
@@ -48,14 +57,37 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
     """
 
     NAME = "sage++"
+    CONFIG = SpeculativeOrchestrationConfig
+
+    _PREDICTOR_FACTORIES = {
+        "habit": HabitPredictor,
+        "dummy": DummyPredictor,
+        "naive-bayes": NaiveBayesPredictor,
+        "small-llm": SmallLLMPredictor,
+    }
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.speculative_engine = SpeculativeExecutionEngine()
-        #self.predictor = DummyPredictor()
+        self._predictor_type = "habit"
         self.predictor = HabitPredictor()
         self.hazard_unit = HazardDetectionUnit()
         self._metrics: dict = {"attempts": 0, "hits": 0, "misses": 0}
+
+    def _ensure_predictor(self, config: OrchestrationConfig) -> None:
+        predictor_type = getattr(config, "predictor_type", self._predictor_type)
+        if predictor_type == self._predictor_type:
+            return
+        predictor_factory = self._PREDICTOR_FACTORIES.get(predictor_type)
+        if predictor_factory is None:
+            logger.warning(
+                "[SAGE++] Unknown predictor_type '%s'. Falling back to 'habit'.",
+                predictor_type,
+            )
+            predictor_type = "habit"
+            predictor_factory = self._PREDICTOR_FACTORIES[predictor_type]
+        self._predictor_type = predictor_type
+        self.predictor = predictor_factory()
 
     @staticmethod
     def _is_error_result(result: Any) -> bool:
@@ -375,6 +407,8 @@ Now, using the tools available to you and the previous results, continue with yo
     async def query(self, message: str, chat: Chat) -> QueryResponse:
         """Process query with speculative execution enabled."""
         self._metrics = {"attempts": 0, "hits": 0, "misses": 0}
+        config = self.get_config()
+        self._ensure_predictor(config)
         response = await super().query(message, chat)
         response.speculative = self._metrics["hits"] > 0
         attempts = self._metrics["attempts"]
