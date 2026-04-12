@@ -10,11 +10,14 @@ bridged to the shadow thread via loop.call_soon_threadsafe() for signalling
 and threading.Event for cancellation.
 """
 
+import datetime
 import json
 import logging
+import os
 import time
 import threading
 import asyncio
+from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 from ..orchestrated import SelfOrchestratedMethod
@@ -22,7 +25,7 @@ from ..orchestrated.orchestrated_routes import OrchestrationConfig
 from ..orchestrated.agents import AgentEvaluator, AgentPlanner, get_current_time
 from ..orchestrated.models import AgentResult, AgentTask
 from ..orchestrated.prompts import BACKGROUND_INFO, GENERAL_CAPABILITIES_RESPONSE
-from ..models import QueryResponse, Chat, AgentMessage, ToolCall
+from ..models import QueryResponse, Chat, AgentMessage, ToolCall, MethodConfig
 
 from .speculative_engine import SpeculativeExecutionEngine
 from .reorder_buffer import ReorderBuffer
@@ -30,6 +33,17 @@ from .predictor.algorithms import DummyPredictor, HabitPredictor, NaiveBayesPred
 from .hazard_detection import HazardDetectionUnit
 
 logger = logging.getLogger(__name__)
+
+
+class SagePlusPlusConfig(OrchestrationConfig):
+    """Extends the base orchestration config with SAGE++-specific settings."""
+    predictor_type: str = MethodConfig.string(
+        default="habit",
+        options=["habit", "naive-bayes", "small-llm"],
+        allow_free_input=False,
+        title="Predictor Type",
+        description="Tool prediction algorithm used by SAGE++ shadow thread",
+    )
 
 
 class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
@@ -48,13 +62,25 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
     """
 
     NAME = "sage++"
+    CONFIG = SagePlusPlusConfig
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.speculative_engine = SpeculativeExecutionEngine()
         self.predictor = HabitPredictor()
         self.hazard_unit = HazardDetectionUnit()
-        self._metrics: dict = {"attempts": 0, "hits": 0, "misses": 0}
+        self._metrics: dict = {"attempts": 0, "hits": 0, "misses": 0, "predictions": []}
+        self._current_predictor_type: str = "habit"
+
+    @staticmethod
+    def _build_predictor(predictor_type: str, candidate_tools: List[str] = None):
+        """Factory: return the right BasePredictor for the given predictor_type string."""
+        if predictor_type == "naive-bayes":
+            return NaiveBayesPredictor()
+        elif predictor_type == "small-llm":
+            return SmallLLMPredictor(candidate_tools=candidate_tools or [])
+        else:  # default: "habit"
+            return HabitPredictor()
 
     @staticmethod
     def _is_error_result(result: Any) -> bool:
@@ -101,7 +127,29 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
         Given the main thread's LLM result and shadow's predicted name,
         either commit the speculative result (MATCH) or cancel and invoke normally (MISS).
         """
-        actual_tool = worker_message.tools[0].name if worker_message.tools else None # SAGE result used as groundtruth
+        actual_tool = worker_message.tools[0].name if worker_message.tools else None  # SAGE (ground truth)
+
+        # ── Prediction logging ────────────────────────────────────────────────
+        # Determine outcome label for this prediction event
+        if shadow_prediction and actual_tool:
+            _outcome = "hit" if shadow_prediction == actual_tool else "miss"
+        elif shadow_prediction:
+            _outcome = "miss"        # predicted but no actual tool called
+        else:
+            _outcome = "no_prediction"   # shadow returned "" (cold start / unsafe)
+
+        self._metrics["predictions"].append({
+            "subtask": current_task.strip().split("\n")[0][:150],
+            "predicted": shadow_prediction or "",
+            "actual": actual_tool or "",
+            "outcome": _outcome,
+        })
+
+        # Online learning: tell the predictor what the correct tool was
+        if actual_tool and hasattr(self.predictor, "update"):
+            self.predictor.update(current_task, actual_tool)
+        # ─────────────────────────────────────────────────────────────────────
+
         # shadow_prediction is the predicted result from sage++
         if shadow_prediction and actual_tool and shadow_prediction == actual_tool:
             # If the shadow prediction matched the LLM’s tool choice, 
@@ -387,11 +435,78 @@ Now, using the tools available to you and the previous results, continue with yo
 
     async def query(self, message: str, chat: Chat) -> QueryResponse:
         """Process query with speculative execution enabled."""
-        self._metrics = {"attempts": 0, "hits": 0, "misses": 0}
+        self._metrics = {"attempts": 0, "hits": 0, "misses": 0, "predictions": []}
+
+        # Switch predictor if config changed since last query
+        config: SagePlusPlusConfig = self.get_config()
+        predictor_type = config.predictor_type
+        if predictor_type != self._current_predictor_type:
+            candidate_tools: List[str] = []
+            if predictor_type == "small-llm":
+                try:
+                    actions = await self.session.opaca_client.get_actions_simple()
+                    candidate_tools = [
+                        action["name"]
+                        for actions_list in actions.values()
+                        for action in actions_list
+                    ]
+                except Exception as e:
+                    logger.warning(f"[SAGE++] Could not fetch tool names for SmallLLMPredictor: {e}")
+            self.predictor = self._build_predictor(predictor_type, candidate_tools)
+            self._current_predictor_type = predictor_type
+            logger.info(f"[SAGE++] Switched predictor to '{predictor_type}'")
+
         response = await super().query(message, chat)
         response.speculative = self._metrics["hits"] > 0
         attempts = self._metrics["attempts"]
         hits = self._metrics["hits"]
         hit_rate = f"{hits / attempts:.1%}" if attempts > 0 else "n/a"
-        logger.info(f"[SAGE++] metrics={self._metrics} hit_rate={hit_rate}")
+        logger.info(f"[SAGE++] predictor={predictor_type} metrics={self._metrics} hit_rate={hit_rate}")
+
+        # Persist predictions for offline analysis
+        self._save_predictions(predictor_type, message)
+
         return response
+
+    def _save_predictions(self, predictor_type: str, query: str) -> None:
+        """Append this query's prediction events to a per-predictor JSONL log file.
+
+        Output directory: <repo>/src/benchmark/benchmark_results/predictions/
+        File name:        predictions_<predictor_type>.jsonl
+
+        Each line is a JSON record:
+            {timestamp, predictor_type, query, summary: {attempts, hits, misses, hit_rate},
+             predictions: [{subtask, predicted, actual, outcome}, ...]}
+        """
+        try:
+            # SAGE_PREDICTIONS_DIR is set via Docker volume mount (see benchmark/docker-compose.yml).
+            # Falls back to the local dev path when running the backend directly on the host.
+            _default = str(
+                Path(__file__).resolve().parent.parent.parent.parent
+                / "benchmark" / "benchmark_results" / "predictions"
+            )
+            output_dir = Path(os.environ.get("SAGE_PREDICTIONS_DIR", _default))
+            output_dir.mkdir(parents=True, exist_ok=True)
+            log_file = output_dir / f"predictions_{predictor_type}.jsonl"
+
+            attempts = self._metrics["attempts"]
+            hits = self._metrics["hits"]
+            record = {
+                "timestamp": datetime.datetime.now().isoformat(),
+                "predictor_type": predictor_type,
+                "query": query[:200],
+                "summary": {
+                    "attempts": attempts,
+                    "hits": hits,
+                    "misses": self._metrics["misses"],
+                    "hit_rate": round(hits / attempts, 4) if attempts > 0 else 0.0,
+                },
+                "predictions": self._metrics["predictions"],
+            }
+
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+
+            logger.info(f"[SAGE++] Prediction log appended → {log_file}")
+        except Exception as e:
+            logger.warning(f"[SAGE++] Could not save predictions: {e}")

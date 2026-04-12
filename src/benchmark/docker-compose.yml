@@ -56,6 +56,11 @@ services:
       ANTHROPIC_API_KEY:
       GEMINI_API_KEY:
       MISTRAL_API_KEY:
+      # Tells the backend where to write per-prediction JSONL logs.
+      # The host path (left side) is created automatically by Docker Compose.
+      SAGE_PREDICTIONS_DIR: /app/predictions
+    volumes:
+      - ./benchmark_results/predictions:/app/predictions
     # allows host.docker.internal to resolve on Linux (no-op on Mac/Windows)
     extra_hosts:
       - "host.docker.internal:host-gateway"
