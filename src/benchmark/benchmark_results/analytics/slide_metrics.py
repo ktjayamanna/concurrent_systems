@@ -4,6 +4,7 @@ import json.decoder
 import random
 import re
 import sys
+import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -171,23 +172,34 @@ def evaluate_predictor(predictor, test_items, candidates_by_family, online=False
     total = 0
     by_split = collections.Counter()
     hits_by_split = collections.Counter()
+    latencies_ms = []
     for split, question in test_items:
         actual = first_expected_tool(question)
         predictor.set_candidate_tools(candidates_by_family[tool_family(actual)])
+        start = time.perf_counter_ns()
         predicted = predictor.predict(question["input"]).split("--")[-1]
+        elapsed_ms = (time.perf_counter_ns() - start) / 1_000_000
         correct = predicted == actual
+        latencies_ms.append(elapsed_ms)
         hits += correct
         total += 1
         by_split[split] += 1
         hits_by_split[split] += correct
         if online:
             predictor.update(question["input"], actual, first_expected_args(question))
+    latency_array = np.array(latencies_ms) if latencies_ms else np.array([0])
     return {
         "hits": hits,
         "total": total,
         "hit_rate": round(hits / total, 4) if total else 0,
         "simple": split_metric(hits_by_split, by_split, "simple"),
         "complex": split_metric(hits_by_split, by_split, "complex"),
+        "predictor_runtime_ms": {
+            "mean": round(float(latency_array.mean()), 4),
+            "median": round(float(np.median(latency_array)), 4),
+            "p95": round(float(np.percentile(latency_array, 95)), 4),
+            "max": round(float(latency_array.max()), 4),
+        },
     }
 
 
@@ -210,6 +222,17 @@ def timing_summary(rows):
     }
 
 
+def overall_tool_selection_ms(simple_rows, complex_rows):
+    values = [row["t_pred"] * 1000 for row in [*simple_rows, *complex_rows]]
+    array = np.array(values)
+    return {
+        "mean": round(float(array.mean()), 1),
+        "median": round(float(np.median(array)), 1),
+        "p95": round(float(np.percentile(array, 95)), 1),
+        "max": round(float(array.max()), 1),
+    }
+
+
 def real_savings(timing, metric):
     simple_ms = timing["simple"]["mean_t_exec_ms"] * metric["simple"]["hit_rate"]
     complex_ms = timing["complex"]["mean_t_exec_ms"] * metric["complex"]["hit_rate"]
@@ -228,6 +251,7 @@ def main():
     simple_rows = extract_rows(load_questions("simple"), "simple")
     complex_rows = extract_rows(load_questions("complex"), "complex")
     timing = {"simple": timing_summary(simple_rows), "complex": timing_summary(complex_rows)}
+    sage_tool_selection_ms = overall_tool_selection_ms(simple_rows, complex_rows)
 
     labeled = all_labeled_questions()
     train, test = stratified_split(labeled)
@@ -250,10 +274,11 @@ def main():
             "candidate_scope": "worker-agent/tool-family candidate set, matching SAGE orchestration after agent routing",
             "label": "first expected benchmark tool call",
             "small_llm_backend": "hf_zero_shot"
-            if getattr(small_llm, "_zero_shot", None) is not None
+            if getattr(small_llm, "_pipeline", None) is not None
             else "local_semantic_scorer",
         },
         "timing": timing,
+        "sage_openai_tool_selection_runtime_ms": sage_tool_selection_ms,
         "predictor_holdout_accuracy": {
             "habit_k10": habit_metrics,
             "naive_bayes": naive_bayes_metrics,
@@ -273,12 +298,14 @@ def main():
     output = FULL_IMPLEMENTATION_DIR / "slide_metrics.json"
     output.write_text(json.dumps(metrics, indent=2) + "\n")
     plot_predictors(metrics["predictor_holdout_accuracy"])
-    plot_accuracy_table(metrics)
+    plot_accuracy_by_query_type(metrics)
+    plot_predictor_runtime(metrics)
 
     print(json.dumps(metrics, indent=2))
     print(f"saved -> {output}")
     print(f"saved -> {FULL_IMPLEMENTATION_DIR / 'predictor_holdout_accuracy.png'}")
     print(f"saved -> {FULL_IMPLEMENTATION_DIR / 'predictor_accuracy_by_query_type.png'}")
+    print(f"saved -> {FULL_IMPLEMENTATION_DIR / 'predictor_runtime_vs_sage_openai.png'}")
 
 
 def plot_predictors(metrics):
@@ -315,7 +342,7 @@ def plot_predictors(metrics):
     plt.close(fig)
 
 
-def plot_accuracy_table(metrics):
+def plot_accuracy_by_query_type(metrics):
     accuracy = metrics["predictor_holdout_accuracy"]
     savings = metrics["real_savings_from_holdout"]
     methodology = metrics["methodology"]
@@ -372,6 +399,52 @@ def plot_accuracy_table(metrics):
     ax.legend(loc="upper left", ncol=4, frameon=False)
     fig.tight_layout()
     fig.savefig(FULL_IMPLEMENTATION_DIR / "predictor_accuracy_by_query_type.png", dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_predictor_runtime(metrics):
+    accuracy = metrics["predictor_holdout_accuracy"]
+    sage_runtime = metrics["sage_openai_tool_selection_runtime_ms"]
+    names = ["SAGE++:\nHabit k=10", "SAGE++:\nNaive Bayes", "SAGE++:\nSmallLLM", "SAGE OpenAI"]
+    means = [
+        accuracy["habit_k10"]["predictor_runtime_ms"]["mean"],
+        accuracy["naive_bayes"]["predictor_runtime_ms"]["mean"],
+        accuracy["small_llm"]["predictor_runtime_ms"]["mean"],
+        sage_runtime["mean"],
+    ]
+    p95s = [
+        accuracy["habit_k10"]["predictor_runtime_ms"]["p95"],
+        accuracy["naive_bayes"]["predictor_runtime_ms"]["p95"],
+        accuracy["small_llm"]["predictor_runtime_ms"]["p95"],
+        sage_runtime["p95"],
+    ]
+    colors = ["#2563eb", "#dc2626", "#16a34a", "#111827"]
+    x = np.arange(len(names))
+    fig, ax = plt.subplots(figsize=(10, 5.8))
+    bars = ax.bar(x, means, color=colors, alpha=0.9)
+    ax.set_yscale("log")
+    ax.set_ylim(0.03, max(means) * 14)
+    ax.set_ylabel("Runtime per tool-selection decision (milliseconds)")
+    ax.set_title("Predictors Run Thousands of Times Faster Than SAGE OpenAI Tool Selection")
+    ax.set_xticks(x)
+    ax.set_xticklabels(names)
+    ax.grid(axis="y", alpha=0.22, which="major")
+    ax.grid(False, which="minor")
+    ax.tick_params(axis="y", which="minor", length=0)
+    for bar, mean, p95 in zip(bars, means, p95s):
+        label = f"mean {mean:.3f}ms\np95 {p95:.3f}ms" if mean < 10 else f"mean {mean:,.0f}ms\np95 {p95:,.0f}ms"
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            mean * 1.35,
+            label,
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold",
+            color="black",
+        )
+    fig.tight_layout()
+    fig.savefig(FULL_IMPLEMENTATION_DIR / "predictor_runtime_vs_sage_openai.png", dpi=180, bbox_inches="tight")
     plt.close(fig)
 
 
