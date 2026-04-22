@@ -1,41 +1,26 @@
-"""
-Hazard detection unit for classifying tools as safe/unsafe.
-"""
-
-import logging
-
-logger = logging.getLogger(__name__)
-
 
 class HazardDetectionUnit:
-    """Classifies tools as safe (read-only) or unsafe (write/delete operations)"""
     
     def __init__(self):
-        '''
-        NOTE: Current policy is conservative around financially costly actions.
-        In future, we can load from config and support undo/compensation for
-        low-risk actions (e.g., some inventory movements).
-        '''
-        self._unsafe_tools_financial = {
-            # Orders / purchasing (direct financial impact)
+        self._unsafe_tools = {
             "MakeOrder",
             "MakeOrders",
             "AddOrder",
             "AddOrders",
             "CancelOrder",
             "OrderSnack",
+            "ScheduleMaintenance",
+            "ScheduleCleaning",
         }
         
     def is_safe(self, tool_name: str) -> bool:
-        """
-        Check if a tool is safe for speculative execution.
-        
-        Args:
-            tool_name: Name of the tool to check
-            
-        Returns:
-            True if safe (read-only), False if unsafe (writes/deletes)
-        """
         if not tool_name:
             return False
-        return tool_name not in self._unsafe_tools_financial
+        action_name = tool_name.split("--", 1)[1] if "--" in tool_name else tool_name
+        if action_name in self._unsafe_tools:
+            return False
+        unsafe_prefixes = (
+            "Book", "CancelOrder", "MakeOrder", "Order", "ScheduleCleaning",
+            "ScheduleMaintenance",
+        )
+        return not action_name.startswith(unsafe_prefixes)

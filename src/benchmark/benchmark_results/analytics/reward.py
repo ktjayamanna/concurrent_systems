@@ -1,4 +1,5 @@
 import json
+import json.decoder
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -9,11 +10,17 @@ ROOT      = Path(__file__).parent
 DATA_DIR  = ROOT.parent / "Orchestration" / "tmp"
 PLOTS_DIR = ROOT / "plots"
 PLOTS_DIR.mkdir(exist_ok=True)
+def load_json_first(path):
+    text = Path(path).read_text()
+    try:
+        return json.loads(text)
+    except json.decoder.JSONDecodeError:
+        decoder = json.JSONDecoder()
+        obj, _ = decoder.raw_decode(text)
+        return obj
 
-# ── Load data ──────────────────────────────────────────────────────────────────
 def load_questions(name):
-    with open(DATA_DIR / f"{name}.json") as f:
-        return json.load(f)["self-orchestrated"]["openai/gpt-4o-mini"]["questions"]
+    return load_json_first(DATA_DIR / f"{name}.json")["self-orchestrated"]["openai/gpt-4o-mini"]["questions"]
 
 simple_qs  = load_questions("simple")
 complex_qs = load_questions("complex")
@@ -39,12 +46,7 @@ all_rows     = simple_rows + complex_rows
 t_pred_all = np.array([r["t_pred"] for r in all_rows])
 t_exec_all = np.array([r["t_exec"] for r in all_rows])
 ratio_all  = t_exec_all / t_pred_all
-
-# ══════════════════════════════════════════════════════════════════════════════
-# INSIGHT 1 — Execution is structurally 30× faster than prediction
-#             The overlap window exists on EVERY query — no exceptions.
-# ══════════════════════════════════════════════════════════════════════════════
-always_exec_faster = (t_exec_all < t_pred_all).mean()   # should be 1.0
+always_exec_faster = (t_exec_all < t_pred_all).mean()
 median_ratio = np.median(ratio_all)
 mean_ratio   = np.mean(ratio_all)
 
@@ -58,11 +60,6 @@ print(f"  Median t_exec / t_pred ratio   : {median_ratio:.3f}x  "
       f"(exec is {1/median_ratio:.0f}× faster)")
 print(f"  Mean   t_exec / t_pred ratio   : {mean_ratio:.3f}x")
 print(f"  → The parallelism window always exists. Speculation is always feasible.")
-
-# ══════════════════════════════════════════════════════════════════════════════
-# INSIGHT 2 — On a hit, the entire execution time is hidden
-#             Savings scale with query complexity — bigger queries win more.
-# ══════════════════════════════════════════════════════════════════════════════
 t_exec_s = np.array([r["t_exec"] for r in simple_rows])
 t_exec_c = np.array([r["t_exec"] for r in complex_rows])
 t_pred_s = np.array([r["t_pred"] for r in simple_rows])
@@ -77,13 +74,7 @@ print(f"  Mean t_exec  complex : {t_exec_c.mean()*1000:.1f}ms  "
       f"(= {100*t_exec_c.mean()/(t_pred_c+t_exec_c).mean():.1f}% of sequential latency)")
 print(f"  Complex saves {t_exec_c.mean()/t_exec_s.mean():.1f}× more per hit than simple")
 print(f"  → Miss penalty is exactly 0; the system can only gain.")
-
-# ══════════════════════════════════════════════════════════════════════════════
-# INSIGHT 3 — LRU cache over single-tool queries (order-preserving)
-#             Order-sensitive cache model over the single-tool subset.
-# ══════════════════════════════════════════════════════════════════════════════
 def lru_hit_rate_single_tool(rows, k):
-    # Preserve dataset order; ignore multi-tool queries (no cache update).
     if not rows:
         return 0.0
     cache = []
@@ -110,8 +101,6 @@ hr_c_lru  = [lru_hit_rate_single_tool(complex_rows, k) for k in ks]
 
 simple_single_n = sum(1 for r in simple_rows if r["n_tools"] == 1 and r["first_tool"])
 complex_single_n = sum(1 for r in complex_rows if r["n_tools"] == 1 and r["first_tool"])
-
-# Expected savings = hit_rate × mean_t_exec (miss cost = 0)
 def expected_saving_per_query(rows, hit_rate):
     t_exec = np.array([r["t_exec"] for r in rows])
     return hit_rate * t_exec.mean()
@@ -137,10 +126,6 @@ print(f"  At k=10 (complex): hit={100*hr_c_lru[9]:.0f}%  "
       f"E[save]={expected_saving_per_query(complex_rows,hr_c_lru[9])*1000:.1f}ms/query")
 print(f"  → LRU cache size 10 covers "
       f"{100*hr_c_lru[9]:.0f}% of complex single-tool queries.")
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Plots — one figure per insight
-# ══════════════════════════════════════════════════════════════════════════════
 col = {"simple": "#4a90d9", "complex": "#e05c5c",
        "saving": "#4caf50", "ratio": "#ff9800", "neutral": "#aaa"}
 
@@ -149,14 +134,9 @@ def save(fig, name):
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  saved → {path}")
-
-# ── reward_1_parallelism_window.png ──────────────────────────────────────────
-# Difference plot: positive means fully hidden (t_pred - t_exec >= 0)
 fig, ax = plt.subplots(figsize=(8, 4.8))
 delta_simple = np.array([r["t_pred"] - r["t_exec"] for r in simple_rows])
 delta_complex = np.array([r["t_pred"] - r["t_exec"] for r in complex_rows])
-
-# jittered strip to show all queries lie in the positive region
 rs = np.random.RandomState(7)
 y_simple = 0.9 + (rs.rand(len(delta_simple)) - 0.5) * 0.12
 y_complex = 1.1 + (rs.rand(len(delta_complex)) - 0.5) * 0.12
@@ -183,8 +163,6 @@ ax.set_title(
 ax.set_xlim(-lim * 0.2, lim); ax.grid(alpha=0.25, axis="x")
 ax.legend(fontsize=9, loc="upper right")
 save(fig, "reward_1_parallelism_window.png")
-
-# ── reward_2_savings_per_hit.png ─────────────────────────────────────────────
 fig, ax = plt.subplots(figsize=(8, 5))
 bins = np.linspace(0, t_exec_all.max() * 1.15, 35) * 1000
 ax.hist(t_exec_s * 1000, bins=bins, color=col["simple"], alpha=0.75,
@@ -202,14 +180,11 @@ ax.set_title(
     fontsize=10, pad=10)
 ax.legend(fontsize=9); ax.grid(alpha=0.25)
 save(fig, "reward_2_savings_per_hit.png")
-
-# ── reward_3_hit_rate_vs_k.png ───────────────────────────────────────────────
 fig, ax = plt.subplots(figsize=(8, 5))
 ax.plot(ks, [h*100 for h in hr_s_lru], "o-", color=col["simple"],  linewidth=2.5,
         markersize=7, label=f"Simple (LRU, n={simple_single_n})")
 ax.plot(ks, [h*100 for h in hr_c_lru], "s-", color=col["complex"], linewidth=2.5,
         markersize=7, label=f"Complex (LRU, n={complex_single_n})")
-# annotate k=3 and k=10
 for k_ann, h_s, h_c in [(3, hr_s_lru[2], hr_c_lru[2]), (10, hr_s_lru[9], hr_c_lru[9])]:
     ax.annotate(f"{100*h_s:.0f}%", xy=(k_ann, h_s*100), xytext=(5,  5),
                 textcoords="offset points", fontsize=8, color=col["simple"])
@@ -220,8 +195,6 @@ ax.set_ylabel("Hit rate  (%)", fontsize=11)
 ax.set_title("LRU cache hit rate (single-tool queries)", fontsize=10, pad=10)
 ax.set_ylim(0, 105); ax.set_xticks(ks); ax.legend(fontsize=9, loc="lower right"); ax.grid(alpha=0.3)
 save(fig, "reward_3_hit_rate_vs_k.png")
-
-# ── reward_4_expected_saving_vs_k.png ────────────────────────────────────────
 es_s = [expected_saving_per_query(simple_rows,  h)*1000 for h in hr_s_lru]
 es_c = [expected_saving_per_query(complex_rows, h)*1000 for h in hr_c_lru]
 

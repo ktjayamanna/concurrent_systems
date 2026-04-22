@@ -1,16 +1,6 @@
-"""
-Speculative self-orchestrated method - SAGE++ implementation.
-
-Uses Python 3.14 free-threaded mode (no GIL) to achieve true parallelism:
-  - Shadow OS thread: predictor.predict() + synchronous OPACA invocation
-  - Main asyncio coroutine: call_llm(WorkerAgent)
-
-Both run on separate CPU cores simultaneously. The asyncio event loop is
-bridged to the shadow thread via loop.call_soon_threadsafe() for signalling
-and threading.Event for cancellation.
-"""
 
 import datetime
+import copy
 import json
 import logging
 import os
@@ -29,14 +19,20 @@ from ..models import QueryResponse, Chat, AgentMessage, ToolCall, MethodConfig
 
 from .speculative_engine import SpeculativeExecutionEngine
 from .reorder_buffer import ReorderBuffer
-from .predictor.algorithms import DummyPredictor, HabitPredictor, NaiveBayesPredictor, SmallLLMPredictor
+from .predictor.algorithms import (
+    DummyPredictor,
+    HabitPredictor,
+    NaiveBayesPredictor,
+    SmallLLMPredictor,
+    ToolPrediction,
+    load_benchmark_training_data,
+)
 from .hazard_detection import HazardDetectionUnit
 
 logger = logging.getLogger(__name__)
 
 
 class SagePlusPlusConfig(OrchestrationConfig):
-    """Extends the base orchestration config with SAGE++-specific settings."""
     predictor_type: str = MethodConfig.string(
         default="habit",
         options=["habit", "naive-bayes", "small-llm"],
@@ -47,19 +43,6 @@ class SagePlusPlusConfig(OrchestrationConfig):
 
 
 class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
-    """
-    SAGE++ — true parallel speculative execution via GIL-free OS threads.
-
-    Shadow OS thread (Core N):
-      predict() → invoke_opaca_action() synchronously
-
-    Main asyncio coroutine (Core 1):
-      call_llm(WorkerAgent) — starts at t=0, no blocking from shadow
-
-    After call_llm() returns:
-      MATCH → join shadow thread, commit from ROB, skip invoke_tools()
-      MISS  → cancel_event.set(), main runs invoke_tools() normally
-    """
 
     NAME = "sage++"
     CONFIG = SagePlusPlusConfig
@@ -69,22 +52,39 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
         self.speculative_engine = SpeculativeExecutionEngine()
         self.predictor = HabitPredictor()
         self.hazard_unit = HazardDetectionUnit()
-        self._metrics: dict = {"attempts": 0, "hits": 0, "misses": 0, "predictions": []}
+        self._metrics: dict = {"attempts": 0, "tool_hits": 0, "hits": 0, "misses": 0, "predictions": []}
         self._current_predictor_type: str = "habit"
 
     @staticmethod
     def _build_predictor(predictor_type: str, candidate_tools: List[str] = None):
-        """Factory: return the right BasePredictor for the given predictor_type string."""
+        training_data = load_benchmark_training_data()
         if predictor_type == "naive-bayes":
-            return NaiveBayesPredictor()
+            predictor = NaiveBayesPredictor(training_data=training_data)
         elif predictor_type == "small-llm":
-            return SmallLLMPredictor(candidate_tools=candidate_tools or [])
-        else:  # default: "habit"
-            return HabitPredictor()
+            predictor = SmallLLMPredictor(candidate_tools=candidate_tools or [], training_data=training_data)
+        else:
+            predictor = HabitPredictor()
+        if candidate_tools and hasattr(predictor, "set_candidate_tools"):
+            predictor.set_candidate_tools(candidate_tools)
+        return predictor
 
     @staticmethod
     def _is_error_result(result: Any) -> bool:
         return isinstance(result, str) and result.startswith("Failed")
+
+    @staticmethod
+    def _tool_names_from_openai_tools(tools: List[dict]) -> List[str]:
+        return [tool["name"] for tool in tools if isinstance(tool, dict) and tool.get("name")]
+
+    def _configure_predictor_tools(self, tools: List[dict]) -> None:
+        if hasattr(self.predictor, "set_candidate_tools"):
+            self.predictor.set_candidate_tools(self._tool_names_from_openai_tools(tools))
+
+    def _predictor_for_tools(self, tools: List[dict]):
+        predictor = copy.copy(self.predictor)
+        if hasattr(predictor, "set_candidate_tools"):
+            predictor.set_candidate_tools(self._tool_names_from_openai_tools(tools))
+        return predictor
 
     def _launch_shadow(
         self,
@@ -93,15 +93,15 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
         loop: asyncio.AbstractEventLoop,
         prediction_future: asyncio.Future,
         cancel_event: threading.Event,
+        predictor=None,
     ) -> threading.Thread:
-        """Launch shadow OS thread. Returns immediately — thread runs in parallel."""
         shadow = threading.Thread(
             target=self.speculative_engine.run_speculative,
             args=(
                 subtask,
                 self.session.opaca_client,
                 self.hazard_unit,
-                self.predictor,
+                predictor or self.predictor,
                 rob,
                 loop,
                 prediction_future,
@@ -117,58 +117,54 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
         worker_message,
         rob: ReorderBuffer,
         shadow: threading.Thread,
-        shadow_prediction: Optional[str],
+        shadow_prediction: Optional[ToolPrediction | str],
         cancel_event: threading.Event,
         agent,
         current_task: str,
         agent_messages: List[AgentMessage],
     ) -> AgentResult:
-        """
-        Given the main thread's LLM result and shadow's predicted name,
-        either commit the speculative result (MATCH) or cancel and invoke normally (MISS).
-        """
-        actual_tool = worker_message.tools[0].name if worker_message.tools else None  # SAGE (ground truth)
-
-        # ── Prediction logging ────────────────────────────────────────────────
-        # Determine outcome label for this prediction event
-        if shadow_prediction and actual_tool:
-            _outcome = "hit" if shadow_prediction == actual_tool else "miss"
-        elif shadow_prediction:
-            _outcome = "miss"        # predicted but no actual tool called
+        actual_tool = worker_message.tools[0].name if worker_message.tools else None
+        actual_args = worker_message.tools[0].args if worker_message.tools else {}
+        if isinstance(shadow_prediction, ToolPrediction):
+            predicted_tool = shadow_prediction.name
+            predicted_args = shadow_prediction.args or {}
         else:
-            _outcome = "no_prediction"   # shadow returned "" (cold start / unsafe)
+            predicted_tool = shadow_prediction or ""
+            predicted_args = {}
+        if predicted_tool and actual_tool:
+            if predicted_tool == actual_tool and predicted_args == (actual_args or {}):
+                _outcome = "hit"
+            elif predicted_tool == actual_tool:
+                _outcome = "tool_hit_arg_miss"
+            else:
+                _outcome = "miss"
+        elif predicted_tool:
+            _outcome = "miss"
+        else:
+            _outcome = "no_prediction"
 
         self._metrics["predictions"].append({
             "subtask": current_task.strip().split("\n")[0][:150],
-            "predicted": shadow_prediction or "",
+            "predicted": predicted_tool or "",
+            "predicted_args": predicted_args,
             "actual": actual_tool or "",
+            "actual_args": actual_args or {},
             "outcome": _outcome,
         })
-
-        # Online learning: tell the predictor what the correct tool was
         if actual_tool and hasattr(self.predictor, "update"):
-            self.predictor.update(current_task, actual_tool)
-        # ─────────────────────────────────────────────────────────────────────
+            self.predictor.update(current_task, actual_tool, actual_args)
 
-        # shadow_prediction is the predicted result from sage++
-        if shadow_prediction and actual_tool and shadow_prediction == actual_tool:
-            # If the shadow prediction matched the LLM’s tool choice, 
-            # wait (without blocking the event loop) for the shadow thread
-            # to finish its speculative OPACA invocation, but only up to the timeout.
+        if predicted_tool and actual_tool and predicted_tool == actual_tool:
+            self._metrics["tool_hits"] += 1
+        if predicted_tool and actual_tool and predicted_tool == actual_tool:
             await asyncio.get_running_loop().run_in_executor(
                 None, shadow.join, self.speculative_engine.timeout
             )
 
-            speculative_result = rob.commit(shadow_prediction, actual_tool)
+            speculative_result = rob.commit(predicted_tool, actual_tool, predicted_args, actual_args)
 
             if speculative_result is not None and not self._is_error_result(speculative_result):
-                # HIT — inject result, skip invoke_tools entirely
                 self._metrics["hits"] += 1
-                # call_llm(...) was supposed to return the LLM’s decision as an AgentMessage. 
-                # That message already contains a ToolCall object in worker_message.tools[0], 
-                # but without a result yet. self.invoke_tools(...) then executes that tool call 
-                # and fills in the result (it usually returns an AgentResult)
-                # below we artificially make that tool call with the speculative result.
                 worker_message.tools[0] = ToolCall(
                     id=worker_message.tools[0].id,
                     type="opaca",
@@ -177,16 +173,12 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
                     result=speculative_result,
                 )
                 agent_messages.append(AgentMessage(agent="WorkerAgent (shadow)", execution_time=0))
-                # Once we updated worker_message.tools[0], we wrap if with AgentResult
-                # to fool the system to think it's the return call from invoke_tools()
                 return AgentResult(
                     agent_name=agent.agent_name,
                     task=current_task,
                     output=f"- Worker Agent Executed: {actual_tool}.",
                     tool_calls=worker_message.tools,
                 )
-
-        # MISS — signal shadow to discard its result, run invoke_tools normally
         self._metrics["misses"] += 1
         cancel_event.set()
         rob.flush()
@@ -203,10 +195,6 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
             all_results: List[AgentResult],
             agent_messages: List[AgentMessage],
     ) -> List[AgentResult]:
-        """
-            Speculative version of _execute_round that polymorphically overrides self._execute_round
-            at orchestrated_method.py to run true parallel speculative execution using GIL-free OS threads.
-        """
 
         agent_evaluator = AgentEvaluator() if config.use_agent_evaluator else None
 
@@ -219,15 +207,12 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
             current_task = f"{subtask.task}\n\n{orchestrator_context}\n{round_context}"
 
             rob = ReorderBuffer()
-            loop = asyncio.get_running_loop() # get the event loop
-            prediction_future = loop.create_future() # gather() wait for this future to be resolved instead of monitoring the shadow thread constantly.
+            loop = asyncio.get_running_loop()
+            prediction_future = loop.create_future()
             cancel_event = threading.Event()
-
-            # Launch shadow OS thread — runs predict() on a separate core immediately
-            shadow = self._launch_shadow(current_task, rob, loop, prediction_future, cancel_event)
+            shadow_predictor = self._predictor_for_tools(worker_agent.tools)
+            shadow = self._launch_shadow(current_task, rob, loop, prediction_future, cancel_event, shadow_predictor)
             self._metrics["attempts"] += 1
-
-            # Start call_llm immediately — predict() and call_llm I/O run on separate cores simultaneously
             worker_message, shadow_prediction = await asyncio.gather(
                 self.call_llm(
                     model=config.worker_model,
@@ -260,9 +245,6 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
             task_str = task.task if isinstance(task, AgentTask) else task
 
             logger.info(f"Executing task for {task.agent_name}: {task_str}")
-            
-            # GeneralAgent is a dumb agent that does not do any llm inferencing.
-            # It just returns a pre-defined response about the system capabilities.
             if agent.agent_name == "GeneralAgent":
                 predefined_response = get_current_time() + BACKGROUND_INFO + GENERAL_CAPABILITIES_RESPONSE.format(
                     agent_capabilities=json.dumps(await self.get_agent_details(), indent=2))
@@ -341,7 +323,7 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
                     tool_calls=[tc for res in ex_results for tc in res.tool_calls],
                 )
 
-            else:  # no planner
+            else:
                 await self.send_status_to_websocket("WorkerAgent", "Executing function calls.\n\n")
 
                 rob = ReorderBuffer()
@@ -349,10 +331,9 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
                 prediction_future = loop.create_future()
                 cancel_event = threading.Event()
 
-                shadow = self._launch_shadow(task_str, rob, loop, prediction_future, cancel_event)
+                shadow_predictor = self._predictor_for_tools(agent.tools)
+                shadow = self._launch_shadow(task_str, rob, loop, prediction_future, cancel_event, shadow_predictor)
                 self._metrics["attempts"] += 1
-
-                # Start call_llm immediately — predict() and call_llm I/O run on separate cores simultaneously
                 worker_message, shadow_prediction = await asyncio.gather(
                     self.call_llm(
                         model=config.worker_model,
@@ -393,25 +374,21 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
                     should_retry = evaluation_message.formatted_output.reiterate
 
                 if should_retry:
-                    retry_task = f"""# Evaluation
+                    retry_task = f"""Evaluation
 
 The Evaluator of your task has indicated that there is crucial information missing to solve the task..
 
-# Your Task:
-
+Task:
 {task_str}
 
-# Your previous output:
-
+Previous output:
 {result.output}
 
-# Your Previous tool calls:
-
+Previous tool calls:
 {[tc.without_id() for tc in result.tool_calls]}
 
-# YOUR GOAL:
-
-Now, using the tools available to you and the previous results, continue with your original task and retrieve all the information necessary to complete and solve the task!"""
+Goal:
+Using the tools available to you and the previous results, continue with your original task and retrieve all the information necessary to complete and solve the task!"""
 
                     worker_message = await self.call_llm(
                         model=config.worker_model,
@@ -434,10 +411,7 @@ Now, using the tools available to you and the previous results, continue with yo
         return await asyncio.gather(*[execute_single_task(task) for task in round_tasks])
 
     async def query(self, message: str, chat: Chat) -> QueryResponse:
-        """Process query with speculative execution enabled."""
-        self._metrics = {"attempts": 0, "hits": 0, "misses": 0, "predictions": []}
-
-        # Switch predictor if config changed since last query
+        self._metrics = {"attempts": 0, "tool_hits": 0, "hits": 0, "misses": 0, "predictions": []}
         config: SagePlusPlusConfig = self.get_config()
         predictor_type = config.predictor_type
         if predictor_type != self._current_predictor_type:
@@ -446,8 +420,8 @@ Now, using the tools available to you and the previous results, continue with yo
                 try:
                     actions = await self.session.opaca_client.get_actions_simple()
                     candidate_tools = [
-                        action["name"]
-                        for actions_list in actions.values()
+                        f"{agent_name}--{action['name']}"
+                        for agent_name, actions_list in actions.items()
                         for action in actions_list
                     ]
                 except Exception as e:
@@ -457,30 +431,22 @@ Now, using the tools available to you and the previous results, continue with yo
             logger.info(f"[SAGE++] Switched predictor to '{predictor_type}'")
 
         response = await super().query(message, chat)
-        response.speculative = self._metrics["hits"] > 0
+        response.speculative = self._metrics["attempts"] > 0
         attempts = self._metrics["attempts"]
         hits = self._metrics["hits"]
+        tool_hits = self._metrics["tool_hits"]
         hit_rate = f"{hits / attempts:.1%}" if attempts > 0 else "n/a"
-        logger.info(f"[SAGE++] predictor={predictor_type} metrics={self._metrics} hit_rate={hit_rate}")
-
-        # Persist predictions for offline analysis
+        tool_hit_rate = f"{tool_hits / attempts:.1%}" if attempts > 0 else "n/a"
+        logger.info(
+            f"[SAGE++] predictor={predictor_type} metrics={self._metrics} "
+            f"commit_hit_rate={hit_rate} tool_hit_rate={tool_hit_rate}"
+        )
         self._save_predictions(predictor_type, message)
 
         return response
 
     def _save_predictions(self, predictor_type: str, query: str) -> None:
-        """Append this query's prediction events to a per-predictor JSONL log file.
-
-        Output directory: <repo>/src/benchmark/benchmark_results/predictions/
-        File name:        predictions_<predictor_type>.jsonl
-
-        Each line is a JSON record:
-            {timestamp, predictor_type, query, summary: {attempts, hits, misses, hit_rate},
-             predictions: [{subtask, predicted, actual, outcome}, ...]}
-        """
         try:
-            # SAGE_PREDICTIONS_DIR is set via Docker volume mount (see benchmark/docker-compose.yml).
-            # Falls back to the local dev path when running the backend directly on the host.
             _default = str(
                 Path(__file__).resolve().parent.parent.parent.parent
                 / "benchmark" / "benchmark_results" / "predictions"
@@ -491,14 +457,17 @@ Now, using the tools available to you and the previous results, continue with yo
 
             attempts = self._metrics["attempts"]
             hits = self._metrics["hits"]
+            tool_hits = self._metrics["tool_hits"]
             record = {
                 "timestamp": datetime.datetime.now().isoformat(),
                 "predictor_type": predictor_type,
                 "query": query[:200],
                 "summary": {
                     "attempts": attempts,
+                    "tool_hits": tool_hits,
                     "hits": hits,
                     "misses": self._metrics["misses"],
+                    "tool_hit_rate": round(tool_hits / attempts, 4) if attempts > 0 else 0.0,
                     "hit_rate": round(hits / attempts, 4) if attempts > 0 else 0.0,
                 },
                 "predictions": self._metrics["predictions"],
