@@ -17,7 +17,7 @@ DATA_DIR = ROOT.parent / "Orchestration" / "tmp"
 PLOTS_DIR = ROOT / "plots"
 FULL_IMPLEMENTATION_DIR = PLOTS_DIR / "full_implementation"
 FULL_IMPLEMENTATION_DIR.mkdir(parents=True, exist_ok=True)
-HABIT_CACHE_SIZE = 119
+HABIT_CACHE_SIZE = 1
 
 sys.path.insert(0, str(REPO / "src" / "Backend"))
 sys.path.insert(0, str(REPO / "src" / "benchmark"))
@@ -277,11 +277,11 @@ def main():
     train, test = stratified_split(labeled)
     candidates = candidate_groups(labeled)
 
-    habit = HabitPredictor(cache_size=HABIT_CACHE_SIZE, training_data=training_rows(train))
+    habit = HabitPredictor(cache_size=HABIT_CACHE_SIZE)
     naive_bayes = NaiveBayesPredictor(training_data=training_rows(train, add_label_text=True))
     small_llm = SmallLLMPredictor(training_data=[])
 
-    habit_metrics = evaluate_predictor(habit, test, candidates, online=True)
+    habit_metrics = evaluate_predictor(habit, labeled, candidates, online=True)
     naive_bayes_metrics = evaluate_predictor(naive_bayes, test, candidates)
     small_llm_metrics = evaluate_predictor(small_llm, labeled, candidates)
 
@@ -296,11 +296,11 @@ def main():
             "naive_bayes_test_prompts": len(test),
             "naive_bayes_simple_test_prompts": sum(1 for split, _question in test if split == "simple"),
             "naive_bayes_complex_test_prompts": sum(1 for split, _question in test if split == "complex"),
-            "habit_eval_prompts": len(test),
+            "habit_eval_prompts": len(labeled),
             "small_llm_eval_prompts": len(labeled),
             "candidate_scope": "worker-agent/tool-family candidate set, matching SAGE orchestration after agent routing",
             "label": "full expected benchmark tool-call sequence",
-            "habit_protocol": "initialized on the same train split as Naive Bayes, then evaluated online on the held-out split",
+            "habit_protocol": "online over the full benchmark with an empty initial cache",
             "small_llm_backend": "hf_zero_shot"
             if getattr(small_llm, "_pipeline", None) is not None
             else "local_semantic_scorer",
@@ -321,8 +321,8 @@ def main():
     metrics["slide_takeaway"] = {
         "latency": "100% correct prediction saves about 77ms/simple and 229ms/complex, or 2.5% and 3.2% of the measured critical path.",
         "ml": (
-            "Full-sequence accuracy is reported with predictor-appropriate protocols: Naive Bayes and Habit use the same held-out split, "
-            "while SmallLLM is zero-shot over the full benchmark."
+            "Full-sequence accuracy is reported with predictor-appropriate protocols: Naive Bayes uses a held-out split, "
+            "while Habit and SmallLLM are evaluated over the full benchmark."
         ),
         "safety": "Financially costly tools are blocked before OPACA invocation; non-costly state changes can still be speculated under the current policy.",
     }
@@ -429,8 +429,8 @@ def plot_accuracy_by_query_type(metrics):
     ax.set_ylabel("Tool-sequence accuracy (%)")
     ax.set_title(
         "Predictor Accuracy by Query Type\n"
-        f"NB + Habit: {methodology['naive_bayes_train_prompts']} train / {methodology['naive_bayes_test_prompts']} held-out; "
-        f"SmallLLM: full benchmark n={methodology['total_prompts']}",
+        f"NB: {methodology['naive_bayes_train_prompts']} train / {methodology['naive_bayes_test_prompts']} held-out; "
+        f"Habit + SmallLLM: full benchmark n={methodology['total_prompts']}",
         fontsize=14,
         fontweight="bold",
     )

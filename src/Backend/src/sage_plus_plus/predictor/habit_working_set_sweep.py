@@ -23,8 +23,6 @@ from benchmark_results.analytics.slide_metrics import (  # noqa: E402
     all_labeled_questions,
     candidate_groups,
     evaluate_predictor,
-    stratified_split,
-    training_rows,
 )
 from src.sage_plus_plus.predictor.algorithms import HabitPredictor  # noqa: E402
 
@@ -47,13 +45,12 @@ def parse_cache_sizes(value: str | None, max_size: int) -> list[int]:
 
 def sweep(cache_sizes: list[int]) -> dict:
     items = all_labeled_questions()
-    train, test = stratified_split(items)
     candidates = candidate_groups(items)
     rows = []
 
     for cache_size in cache_sizes:
-        predictor = HabitPredictor(cache_size=cache_size, training_data=training_rows(train))
-        metrics = evaluate_predictor(predictor, test, candidates, online=True)
+        predictor = HabitPredictor(cache_size=cache_size)
+        metrics = evaluate_predictor(predictor, items, candidates, online=True)
         rows.append(
             {
                 "cache_size": cache_size,
@@ -77,13 +74,8 @@ def sweep(cache_sizes: list[int]) -> dict:
         ),
     )
     return {
-        "protocol": (
-            "Habit predictor initialized on the same train split as Naive Bayes, then evaluated online "
-            "on the held-out split; full tool-sequence exact match."
-        ),
+        "protocol": "Habit predictor online over the full benchmark with an empty initial cache; full tool-sequence exact match.",
         "total_prompts": len(items),
-        "train_prompts": len(train),
-        "test_prompts": len(test),
         "best": best,
         "rows": rows,
     }
@@ -131,7 +123,11 @@ def plot_sweep(result: dict, plot_path: Path) -> None:
         fontweight="bold",
         arrowprops={"arrowstyle": "->", "color": "#111827", "lw": 1.2},
     )
-    ax.set_title("Habit Predictor Working-Set Sweep", fontsize=15, fontweight="bold")
+    ax.set_title(
+        f"Habit Predictor Working-Set Sweep\nOnline full-benchmark stream, n={result['total_prompts']}, empty initial cache",
+        fontsize=15,
+        fontweight="bold",
+    )
     ax.set_xlabel("Cache size / working set k")
     ax.set_ylabel("Full tool-sequence accuracy (%)")
     ax.set_xlim(-10, max(cache_sizes) + 10)
