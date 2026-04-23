@@ -1,2 +1,7 @@
 numpy
 matplotlib
+httpx
+openai
+pydantic
+rich
+requests
