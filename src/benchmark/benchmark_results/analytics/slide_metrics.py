@@ -325,10 +325,15 @@ def main():
         for name, value in metrics["predictor_holdout_accuracy"].items()
     }
     metrics["slide_takeaway"] = {
-        "latency": "100% correct prediction saves about 77ms/simple and 229ms/complex, or 2.5% and 3.2% of the measured critical path.",
+        "latency": (
+            "Figure X shows that speculation can only recover the tool-execution slice of the critical path, so the upside is modest even with a perfect predictor. "
+            "In the current benchmark, 100% correct speculation would save about 76.7 ms for simple queries and 228.8 ms for complex queries, which corresponds to just 2.47% and 3.24% of the measured end-to-end critical path. "
+            "That makes the figure a ceiling analysis rather than a promise of larger system-wide speedups: speculation helps, but it cannot erase the dominant tool-selection latency."
+        ),
         "ml": (
-            "Full-sequence accuracy is reported with predictor-appropriate protocols: Naive Bayes uses a held-out split, "
-            "SmallLLM few-shot uses the same held-out split, while Habit and zero-shot SmallLLM are evaluated over the full benchmark."
+            "Figure X shows that current predictor performance remains below the previously assumed 50% target in the settings that matter most for robust generalization. "
+            "Across the full benchmark, Habit reaches 40.6% overall accuracy and SmallLLM zero-shot reaches 45.7%, with both models performing much better on simple queries (48.6% and 55.3%) than on complex ones (5.0% and 2.5%). "
+            "Held-out results are mixed: Naive Bayes reaches 34.1% overall, while SmallLLM few-shot reaches 46.6% overall, but its 100.0% complex score comes from only 3 held-out complex prompts, so that result should be treated as suggestive rather than conclusive."
         ),
         "safety": "Financially costly tools are blocked before OPACA invocation; non-costly state changes can still be speculated under the current policy.",
     }
@@ -387,7 +392,6 @@ def plot_predictors(metrics):
 def plot_accuracy_by_query_type(metrics):
     accuracy = metrics["predictor_holdout_accuracy"]
     savings = metrics["real_savings_from_holdout"]
-    methodology = metrics["methodology"]
     habit_key = f"habit_k{HABIT_CACHE_SIZE}"
     names = [f"Habit k={HABIT_CACHE_SIZE}", "Naive Bayes", "SmallLLM zero-shot", "SmallLLM few-shot"]
     keys = [habit_key, "naive_bayes", "small_llm", "few_shot_small_llm"]
@@ -434,14 +438,7 @@ def plot_accuracy_by_query_type(metrics):
     ax.axhline(50, color="#374151", linestyle=":", linewidth=1.4, label="50% target")
     ax.set_ylim(0, 105)
     ax.set_ylabel("Tool-sequence accuracy (%)")
-    ax.set_title(
-        "Predictor Accuracy by Query Type\n"
-        f"NB + few-shot: {methodology['naive_bayes_train_prompts']} train / {methodology['naive_bayes_test_prompts']} held-out "
-        f"(simple {methodology['naive_bayes_simple_test_prompts']}, complex {methodology['naive_bayes_complex_test_prompts']}); "
-        f"Habit + zero-shot: full benchmark n={methodology['total_prompts']}",
-        fontsize=14,
-        fontweight="bold",
-    )
+    ax.set_title("Accuracy by Query Type", fontsize=14, fontweight="bold")
     ax.set_xticks(x)
     ax.set_xticklabels(names)
     ax.grid(axis="y", alpha=0.25)
