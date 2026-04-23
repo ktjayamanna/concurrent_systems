@@ -2,6 +2,7 @@
 import logging
 import threading
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
 import httpx
@@ -34,40 +35,53 @@ class SpeculativeExecutionEngine:
                 prediction = predictor.predict_call(subtask)
             else:
                 prediction = ToolPrediction(predictor.predict(subtask), {})
-            predicted_tool = prediction.name
-            predicted_args = prediction.args or {}
+            predicted_calls = list(prediction.calls)
+            if not predicted_calls:
+                loop.call_soon_threadsafe(prediction_future.set_result, None)
+                return
 
-            if not hazard_unit.is_safe(predicted_tool):
-                logger.debug(f"[HAZARD_BLOCK] Tool {predicted_tool} is unsafe, skipping speculation")
+            unsafe = [call.name for call in predicted_calls if not hazard_unit.is_safe(call.name)]
+            if unsafe:
+                logger.debug(f"[HAZARD_BLOCK] Tools {unsafe} are unsafe, skipping speculation")
                 loop.call_soon_threadsafe(prediction_future.set_result, None)
                 return
             loop.call_soon_threadsafe(prediction_future.set_result, prediction)
 
             if cancel_event.is_set():
                 return
-            if "--" in predicted_tool:
-                agent_name, action_name = predicted_tool.split("--", 1)
-            else:
-                agent_name, action_name = None, predicted_tool
 
-            agent_path = f"/{agent_name}" if agent_name else ""
-            url = f"{opaca_client.url}/invoke/{action_name}{agent_path}"
+            def invoke_predicted_call(call):
+                if cancel_event.is_set():
+                    return None
+                if "--" in call.name:
+                    agent_name, action_name = call.name.split("--", 1)
+                else:
+                    agent_name, action_name = None, call.name
 
-            with httpx.Client() as client:
-                response = client.post(
-                    url,
-                    json=predicted_args,
-                    headers=opaca_client._headers(),
-                    timeout=self.timeout,
-                )
+                agent_path = f"/{agent_name}" if agent_name else ""
+                url = f"{opaca_client.url}/invoke/{action_name}{agent_path}"
+                args = call.args or {}
+                with httpx.Client() as client:
+                    response = client.post(
+                        url,
+                        json=args,
+                        headers=opaca_client._headers(),
+                        timeout=self.timeout,
+                    )
                 response.raise_for_status()
-                result = response.json()
+                return (call.name, args, response.json())
+
+            with ThreadPoolExecutor(max_workers=max(len(predicted_calls), 1)) as executor:
+                stored_calls = list(executor.map(invoke_predicted_call, predicted_calls))
+            if any(call is None for call in stored_calls):
+                logger.debug("[SHADOW_CANCELLED] MISMATCH detected, discarding speculative sequence")
+                return
             if cancel_event.is_set():
-                logger.debug(f"[SHADOW_CANCELLED] MISMATCH detected, discarding result for {predicted_tool}")
+                logger.debug("[SHADOW_CANCELLED] MISMATCH detected, discarding speculative sequence")
                 return
 
-            rob.store(predicted_tool, result, predicted_args)
-            logger.debug(f"[SHADOW_HIT] Speculative invocation succeeded for {predicted_tool}")
+            rob.store_many(stored_calls)
+            logger.debug("[SHADOW_HIT] Speculative invocation succeeded for %s", [call.name for call in predicted_calls])
 
         except httpx.TimeoutException:
             logger.debug(f"[SHADOW_TIMEOUT] Speculative invocation timed out for {subtask}")

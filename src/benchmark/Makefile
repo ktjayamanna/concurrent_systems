@@ -1,7 +1,7 @@
 PREDICTOR_TYPE ?= habit
 BENCHMARK_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
-.PHONY: benchmark-complex benchmark-complex-sagepp benchmark-simple benchmark-simple-sagepp analytics slide-metrics clean
+.PHONY: benchmark-complex benchmark-complex-sagepp benchmark-simple benchmark-simple-sagepp analytics slide-metrics habit-sweep clean
 
 benchmark-complex:
 	cd $(BENCHMARK_DIR) && python3 run.py -s complex -b self-orchestrated -m openai/gpt-4o-mini -j --out complex.json
@@ -22,6 +22,9 @@ analytics:
 
 slide-metrics:
 	cd $(BENCHMARK_DIR) && python3 benchmark_results/analytics/slide_metrics.py
+
+habit-sweep:
+	cd $(BENCHMARK_DIR)/../.. && python3 src/Backend/src/sage_plus_plus/predictor/habit_working_set_sweep.py
 
 clean:
 	cd $(BENCHMARK_DIR) && docker compose stop opaca-llm-backend

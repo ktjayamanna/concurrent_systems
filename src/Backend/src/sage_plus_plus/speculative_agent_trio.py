@@ -123,60 +123,64 @@ class SpeculativeSelfOrchestratedMethod(SelfOrchestratedMethod):
         current_task: str,
         agent_messages: List[AgentMessage],
     ) -> AgentResult:
-        actual_tool = worker_message.tools[0].name if worker_message.tools else None
-        actual_args = worker_message.tools[0].args if worker_message.tools else {}
+        actual_calls = [(tool.name, tool.args or {}) for tool in worker_message.tools]
         if isinstance(shadow_prediction, ToolPrediction):
-            predicted_tool = shadow_prediction.name
-            predicted_args = shadow_prediction.args or {}
+            predicted_calls = [(call.name, call.args or {}) for call in shadow_prediction.calls]
         else:
-            predicted_tool = shadow_prediction or ""
-            predicted_args = {}
-        if predicted_tool and actual_tool:
-            if predicted_tool == actual_tool and predicted_args == (actual_args or {}):
+            predicted_calls = [(shadow_prediction, {})] if shadow_prediction else []
+        actual_tool_names = [name for name, _args in actual_calls]
+        predicted_tool_names = [name for name, _args in predicted_calls]
+        actual_tool = actual_tool_names[0] if actual_tool_names else None
+        predicted_tool = predicted_tool_names[0] if predicted_tool_names else ""
+        if predicted_calls and actual_calls:
+            if predicted_calls == actual_calls:
                 _outcome = "hit"
-            elif predicted_tool == actual_tool:
-                _outcome = "tool_hit_arg_miss"
+            elif predicted_tool_names == actual_tool_names:
+                _outcome = "tool_sequence_hit_arg_miss"
             else:
                 _outcome = "miss"
-        elif predicted_tool:
+        elif predicted_calls:
             _outcome = "miss"
         else:
             _outcome = "no_prediction"
 
         self._metrics["predictions"].append({
             "subtask": current_task.strip().split("\n")[0][:150],
-            "predicted": predicted_tool or "",
-            "predicted_args": predicted_args,
-            "actual": actual_tool or "",
-            "actual_args": actual_args or {},
+            "predicted": predicted_tool_names,
+            "predicted_args": [args for _name, args in predicted_calls],
+            "actual": actual_tool_names,
+            "actual_args": [args for _name, args in actual_calls],
             "outcome": _outcome,
         })
-        if actual_tool and hasattr(self.predictor, "update"):
-            self.predictor.update(current_task, actual_tool, actual_args)
+        if actual_calls and hasattr(self.predictor, "update_calls"):
+            self.predictor.update_calls(current_task, actual_calls)
 
-        if predicted_tool and actual_tool and predicted_tool == actual_tool:
+        if predicted_tool_names and actual_tool_names and predicted_tool_names == actual_tool_names:
             self._metrics["tool_hits"] += 1
-        if predicted_tool and actual_tool and predicted_tool == actual_tool:
+        if predicted_calls and actual_calls and predicted_tool_names == actual_tool_names:
             await asyncio.get_running_loop().run_in_executor(
                 None, shadow.join, self.speculative_engine.timeout
             )
 
-            speculative_result = rob.commit(predicted_tool, actual_tool, predicted_args, actual_args)
+            speculative_results = rob.commit_many(predicted_calls, actual_calls)
 
-            if speculative_result is not None and not self._is_error_result(speculative_result):
+            if speculative_results is not None and not any(self._is_error_result(result) for result in speculative_results):
                 self._metrics["hits"] += 1
-                worker_message.tools[0] = ToolCall(
-                    id=worker_message.tools[0].id,
-                    type="opaca",
-                    name=actual_tool,
-                    args=worker_message.tools[0].args,
-                    result=speculative_result,
-                )
+                worker_message.tools = [
+                    ToolCall(
+                        id=tool.id,
+                        type=tool.type,
+                        name=tool.name,
+                        args=tool.args,
+                        result=result,
+                    )
+                    for tool, result in zip(worker_message.tools, speculative_results)
+                ]
                 agent_messages.append(AgentMessage(agent="WorkerAgent (shadow)", execution_time=0))
                 return AgentResult(
                     agent_name=agent.agent_name,
                     task=current_task,
-                    output=f"- Worker Agent Executed: {actual_tool}.",
+                    output="\n".join(f"- Worker Agent Executed: {tool.name}." for tool in worker_message.tools),
                     tool_calls=worker_message.tools,
                 )
         self._metrics["misses"] += 1

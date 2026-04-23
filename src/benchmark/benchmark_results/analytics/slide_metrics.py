@@ -17,6 +17,7 @@ DATA_DIR = ROOT.parent / "Orchestration" / "tmp"
 PLOTS_DIR = ROOT / "plots"
 FULL_IMPLEMENTATION_DIR = PLOTS_DIR / "full_implementation"
 FULL_IMPLEMENTATION_DIR.mkdir(parents=True, exist_ok=True)
+HABIT_CACHE_SIZE = 119
 
 sys.path.insert(0, str(REPO / "src" / "Backend"))
 sys.path.insert(0, str(REPO / "src" / "benchmark"))
@@ -26,6 +27,7 @@ from question_sets.complex import complex_questions
 from src.sage_plus_plus.predictor.algorithms import (
     HabitPredictor,
     NaiveBayesPredictor,
+    PredictedToolCall,
     SmallLLMPredictor,
 )
 
@@ -92,25 +94,34 @@ def extract_rows(questions, label):
     return rows
 
 
-def first_expected_tool(question):
-    return question["tools"][0].name if question.get("tools") else ""
+def expected_calls(question):
+    return tuple(
+        PredictedToolCall(tool.name, {param.key: param.value for param in getattr(tool, "args", [])})
+        for tool in question.get("tools", [])
+        if not getattr(tool, "optional", False)
+    )
+
+
+def expected_tool_sequence(question):
+    return tuple(call.name for call in expected_calls(question))
 
 
 def first_expected_args(question):
-    if not question.get("tools"):
+    calls = expected_calls(question)
+    if not calls:
         return {}
-    return {param.key: param.value for param in getattr(question["tools"][0], "args", [])}
+    return calls[0].args
 
 
 def all_labeled_questions():
     return [
         ("simple", question)
         for question in simple_questions
-        if first_expected_tool(question)
+        if expected_tool_sequence(question)
     ] + [
         ("complex", question)
         for question in complex_questions
-        if first_expected_tool(question)
+        if expected_tool_sequence(question)
     ]
 
 
@@ -126,19 +137,22 @@ def tool_family(tool_name):
 
 def stratified_split(items, test_fraction=0.30, seed=7):
     rng = random.Random(seed)
-    by_label = collections.defaultdict(list)
+    by_label = collections.defaultdict(lambda: collections.defaultdict(list))
     train = []
     test = []
     for item in items:
-        by_label[first_expected_tool(item[1])].append(item)
-    for label, group in by_label.items():
-        rng.shuffle(group)
-        if len(group) == 1:
-            train.extend(group)
+        by_label[expected_tool_sequence(item[1])][item[1]["input"]].append(item)
+    for _label, by_input in by_label.items():
+        groups = list(by_input.values())
+        rng.shuffle(groups)
+        if len(groups) == 1:
+            train.extend(groups[0])
             continue
-        test_count = max(1, round(len(group) * test_fraction))
-        test.extend(group[:test_count])
-        train.extend(group[test_count:])
+        test_count = max(1, round(len(groups) * test_fraction))
+        for group in groups[:test_count]:
+            test.extend(group)
+        for group in groups[test_count:]:
+            train.extend(group)
     return train, test
 
 
@@ -148,19 +162,23 @@ def split_identifier(value):
 
 def training_rows(items, add_label_text=False):
     rows = [
-        (question["input"], first_expected_tool(question), first_expected_args(question))
+        (question["input"], expected_calls(question))
         for _split, question in items
     ]
     if not add_label_text:
         return rows
-    for label in sorted({first_expected_tool(question) for _split, question in items}):
+    for sequence in sorted({expected_tool_sequence(question) for _split, question in items}):
+        if not sequence:
+            continue
+        label = sequence[0]
         words = split_identifier(label)
-        rows.extend([(words, label, {}), (f"use {words}", label, {}), (f"call {words}", label, {})])
+        calls = tuple(PredictedToolCall(name, {}) for name in sequence)
+        rows.extend([(words, calls), (f"use {words}", calls), (f"call {words}", calls)])
     return rows
 
 
 def candidate_groups(items):
-    labels = sorted({first_expected_tool(question) for _split, question in items})
+    labels = sorted({tool for _split, question in items for tool in expected_tool_sequence(question)})
     groups = collections.defaultdict(list)
     for label in labels:
         groups[tool_family(label)].append(f"Agent--{label}")
@@ -174,19 +192,21 @@ def evaluate_predictor(predictor, test_items, candidates_by_family, online=False
     hits_by_split = collections.Counter()
     latencies_ms = []
     for split, question in test_items:
-        actual = first_expected_tool(question)
-        predictor.set_candidate_tools(candidates_by_family[tool_family(actual)])
+        actual_sequence = expected_tool_sequence(question)
+        first_actual = actual_sequence[0]
+        predictor.set_candidate_tools(candidates_by_family[tool_family(first_actual)])
         start = time.perf_counter_ns()
-        predicted = predictor.predict(question["input"]).split("--")[-1]
+        prediction = predictor.predict_call(question["input"])
+        predicted_sequence = tuple(call.name.split("--")[-1] for call in prediction.calls)
         elapsed_ms = (time.perf_counter_ns() - start) / 1_000_000
-        correct = predicted == actual
+        correct = predicted_sequence == actual_sequence
         latencies_ms.append(elapsed_ms)
         hits += correct
         total += 1
         by_split[split] += 1
         hits_by_split[split] += correct
         if online:
-            predictor.update(question["input"], actual, first_expected_args(question))
+            predictor.update_calls(question["input"], [(call.name, call.args) for call in expected_calls(question)])
     latency_array = np.array(latencies_ms) if latencies_ms else np.array([0])
     return {
         "hits": hits,
@@ -257,30 +277,39 @@ def main():
     train, test = stratified_split(labeled)
     candidates = candidate_groups(labeled)
 
-    habit = HabitPredictor(cache_size=10, training_data=training_rows(train))
+    habit = HabitPredictor(cache_size=HABIT_CACHE_SIZE, training_data=training_rows(train))
     naive_bayes = NaiveBayesPredictor(training_data=training_rows(train, add_label_text=True))
     small_llm = SmallLLMPredictor(training_data=[])
 
     habit_metrics = evaluate_predictor(habit, test, candidates, online=True)
     naive_bayes_metrics = evaluate_predictor(naive_bayes, test, candidates)
-    small_llm_metrics = evaluate_predictor(small_llm, test, candidates)
+    small_llm_metrics = evaluate_predictor(small_llm, labeled, candidates)
 
     metrics = {
         "methodology": {
-            "split": "stratified 70/30 by expected first tool; singleton labels stay in train",
+            "split": "Naive Bayes only: stratified 70/30 by expected full tool-call sequence; singleton labels stay in train; duplicate prompt texts stay in one split",
             "seed": 7,
-            "train_prompts": len(train),
-            "test_prompts": len(test),
+            "total_prompts": len(labeled),
+            "total_simple_prompts": sum(1 for split, _question in labeled if split == "simple"),
+            "total_complex_prompts": sum(1 for split, _question in labeled if split == "complex"),
+            "naive_bayes_train_prompts": len(train),
+            "naive_bayes_test_prompts": len(test),
+            "naive_bayes_simple_test_prompts": sum(1 for split, _question in test if split == "simple"),
+            "naive_bayes_complex_test_prompts": sum(1 for split, _question in test if split == "complex"),
+            "habit_eval_prompts": len(test),
+            "small_llm_eval_prompts": len(labeled),
             "candidate_scope": "worker-agent/tool-family candidate set, matching SAGE orchestration after agent routing",
-            "label": "first expected benchmark tool call",
+            "label": "full expected benchmark tool-call sequence",
+            "habit_protocol": "initialized on the same train split as Naive Bayes, then evaluated online on the held-out split",
             "small_llm_backend": "hf_zero_shot"
             if getattr(small_llm, "_pipeline", None) is not None
             else "local_semantic_scorer",
+            "small_llm_protocol": "zero-shot/local semantic scorer over the full benchmark; no supervised prompt training examples",
         },
         "timing": timing,
         "sage_openai_tool_selection_runtime_ms": sage_tool_selection_ms,
         "predictor_holdout_accuracy": {
-            "habit_k10": habit_metrics,
+            f"habit_k{HABIT_CACHE_SIZE}": habit_metrics,
             "naive_bayes": naive_bayes_metrics,
             "small_llm": small_llm_metrics,
         },
@@ -291,7 +320,10 @@ def main():
     }
     metrics["slide_takeaway"] = {
         "latency": "100% correct prediction saves about 77ms/simple and 229ms/complex, or 2.5% and 3.2% of the measured critical path.",
-        "ml": "Held-out predictor accuracy is the honest result: SmallLLM clears 50% overall; Naive Bayes is below 50%; Habit does not generalize on held-out prompts.",
+        "ml": (
+            "Full-sequence accuracy is reported with predictor-appropriate protocols: Naive Bayes and Habit use the same held-out split, "
+            "while SmallLLM is zero-shot over the full benchmark."
+        ),
         "safety": "Financially costly tools are blocked before OPACA invocation; non-costly state changes can still be speculated under the current policy.",
     }
 
@@ -309,9 +341,10 @@ def main():
 
 
 def plot_predictors(metrics):
-    names = ["Habit\nk=10", "Naive\nBayes", "SmallLLM"]
+    habit_key = f"habit_k{HABIT_CACHE_SIZE}"
+    names = [f"Habit\nk={HABIT_CACHE_SIZE}", "Naive\nBayes", "SmallLLM"]
     values = [
-        metrics["habit_k10"]["hit_rate"] * 100,
+        metrics[habit_key]["hit_rate"] * 100,
         metrics["naive_bayes"]["hit_rate"] * 100,
         metrics["small_llm"]["hit_rate"] * 100,
     ]
@@ -320,14 +353,16 @@ def plot_predictors(metrics):
     bars = ax.bar(x, values, color=["#4a90d9", "#e05c5c", "#4caf50"], alpha=0.9)
     ax.axhline(50, color="#555", linestyle=":", linewidth=1.4, label="50% target")
     ax.set_ylim(0, 100)
-    ax.set_ylabel("Held-out tool-selection accuracy (%)")
-    ax.set_title("Predictor accuracy on held-out benchmark prompts")
+    ax.set_ylabel("Tool-sequence accuracy (%)")
+    ax.set_title("Predictor accuracy by evaluation protocol")
     ax.set_xticks(x)
     ax.set_xticklabels(names)
     ax.legend(loc="upper left")
     ax.grid(axis="y", alpha=0.25)
     for bar in bars:
         height = bar.get_height()
+        if height <= 0:
+            continue
         ax.text(
             bar.get_x() + bar.get_width() / 2,
             height + 1.5,
@@ -346,8 +381,9 @@ def plot_accuracy_by_query_type(metrics):
     accuracy = metrics["predictor_holdout_accuracy"]
     savings = metrics["real_savings_from_holdout"]
     methodology = metrics["methodology"]
-    names = ["Habit k=10", "Naive Bayes", "SmallLLM option"]
-    keys = ["habit_k10", "naive_bayes", "small_llm"]
+    habit_key = f"habit_k{HABIT_CACHE_SIZE}"
+    names = [f"Habit k={HABIT_CACHE_SIZE}", "Naive Bayes", "SmallLLM option"]
+    keys = [habit_key, "naive_bayes", "small_llm"]
     series = [
         (
             "Overall",
@@ -375,21 +411,26 @@ def plot_accuracy_by_query_type(metrics):
     for offset, (label, values, ms_values, color) in zip(offsets, series):
         bars = ax.bar(x + offset, values, width, label=label, color=color, alpha=0.9)
         for bar, value, ms_value in zip(bars, values, ms_values):
+            if value <= 0:
+                continue
+            y = value + 1.4 if value < 92 else value - 3.0
+            va = "bottom" if value < 92 else "top"
             ax.text(
                 bar.get_x() + bar.get_width() / 2,
-                value + 1.2,
-                f"{value:.1f}%\n{ms_value:.1f}ms/q saved",
+                y,
+                f"{value:.1f}%",
                 ha="center",
-                va="bottom",
-                fontsize=8,
+                va=va,
+                fontsize=9,
                 fontweight="bold",
             )
     ax.axhline(50, color="#374151", linestyle=":", linewidth=1.4, label="50% target")
-    ax.set_ylim(0, 78)
-    ax.set_ylabel("Held-out tool-selection accuracy (%)")
+    ax.set_ylim(0, 105)
+    ax.set_ylabel("Tool-sequence accuracy (%)")
     ax.set_title(
-        "Predictor Accuracy and Real Savings by Query Type\n"
-        f"Train prompts: {methodology['train_prompts']} | Held-out prompts: {methodology['test_prompts']}",
+        "Predictor Accuracy by Query Type\n"
+        f"NB + Habit: {methodology['naive_bayes_train_prompts']} train / {methodology['naive_bayes_test_prompts']} held-out; "
+        f"SmallLLM: full benchmark n={methodology['total_prompts']}",
         fontsize=14,
         fontweight="bold",
     )
@@ -405,15 +446,16 @@ def plot_accuracy_by_query_type(metrics):
 def plot_predictor_runtime(metrics):
     accuracy = metrics["predictor_holdout_accuracy"]
     sage_runtime = metrics["sage_openai_tool_selection_runtime_ms"]
-    names = ["SAGE++:\nHabit k=10", "SAGE++:\nNaive Bayes", "SAGE++:\nSmallLLM", "SAGE OpenAI"]
+    habit_key = f"habit_k{HABIT_CACHE_SIZE}"
+    names = [f"SAGE++:\nHabit k={HABIT_CACHE_SIZE}", "SAGE++:\nNaive Bayes", "SAGE++:\nSmallLLM", "SAGE OpenAI"]
     means = [
-        accuracy["habit_k10"]["predictor_runtime_ms"]["mean"],
+        accuracy[habit_key]["predictor_runtime_ms"]["mean"],
         accuracy["naive_bayes"]["predictor_runtime_ms"]["mean"],
         accuracy["small_llm"]["predictor_runtime_ms"]["mean"],
         sage_runtime["mean"],
     ]
     p95s = [
-        accuracy["habit_k10"]["predictor_runtime_ms"]["p95"],
+        accuracy[habit_key]["predictor_runtime_ms"]["p95"],
         accuracy["naive_bayes"]["predictor_runtime_ms"]["p95"],
         accuracy["small_llm"]["predictor_runtime_ms"]["p95"],
         sage_runtime["p95"],

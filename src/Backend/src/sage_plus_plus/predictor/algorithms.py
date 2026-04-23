@@ -17,10 +17,26 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class ToolPrediction:
+class PredictedToolCall:
 
     name: str
     args: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ToolPrediction:
+
+    name: str = ""
+    args: dict[str, Any] = field(default_factory=dict)
+    calls: tuple[PredictedToolCall, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        if not self.calls and self.name:
+            object.__setattr__(self, "calls", (PredictedToolCall(self.name, self.args or {}),))
+        elif self.calls and not self.name:
+            first = self.calls[0]
+            object.__setattr__(self, "name", first.name)
+            object.__setattr__(self, "args", first.args or {})
 
 
 def _first_line(subtask: str) -> str:
@@ -87,6 +103,49 @@ def _tool_param_dict(tool: Any) -> dict[str, Any]:
     return {getattr(param, "key", ""): getattr(param, "value", None) for param in params if getattr(param, "key", "")}
 
 
+def _tool_sequence(question: dict[str, Any]) -> tuple[PredictedToolCall, ...]:
+    tools = [tool for tool in question.get("tools", []) if not getattr(tool, "optional", False)]
+    return tuple(PredictedToolCall(tool.name, _tool_param_dict(tool)) for tool in tools)
+
+
+def _freeze_calls(calls: tuple[PredictedToolCall, ...] | list[PredictedToolCall]) -> str:
+    return json.dumps(
+        [{"name": _action_name(call.name), "args": call.args or {}} for call in calls],
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _unfreeze_calls(value: str) -> tuple[PredictedToolCall, ...]:
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(decoded, list):
+        return ()
+    calls = []
+    for item in decoded:
+        if isinstance(item, dict) and item.get("name"):
+            args = item.get("args") if isinstance(item.get("args"), dict) else {}
+            calls.append(PredictedToolCall(item["name"], args))
+    return tuple(calls)
+
+
+def _normalize_training_item(item: tuple[Any, ...]) -> tuple[str, tuple[PredictedToolCall, ...]]:
+    subtask = item[0]
+    label = item[1]
+    args = item[2] if len(item) > 2 and isinstance(item[2], dict) else {}
+    if isinstance(label, (list, tuple)):
+        calls = tuple(
+            call if isinstance(call, PredictedToolCall)
+            else PredictedToolCall(call[0], call[1] if len(call) > 1 and isinstance(call[1], dict) else {})
+            for call in label
+        )
+    else:
+        calls = (PredictedToolCall(label, args),)
+    return subtask, calls
+
+
 def _find_benchmark_dir() -> Optional[Path]:
     here = Path(__file__).resolve()
     for parent in here.parents:
@@ -123,13 +182,12 @@ def load_benchmark_training_data() -> list[tuple[str, str, dict[str, Any]]]:
     examples: list[tuple[str, str, dict[str, Any]]] = []
     for question in [*simple, *complex_]:
         text = question.get("input", "")
-        tools = [tool for tool in question.get("tools", []) if not getattr(tool, "optional", False)]
-        if not text or not tools:
+        calls = _tool_sequence(question)
+        if not text or not calls:
             continue
-        first = tools[0]
-        examples.append((text, first.name, _tool_param_dict(first)))
-        for tool in tools:
-            args = _tool_param_dict(tool)
+        examples.append((text, calls))
+        for tool in calls:
+            args = tool.args
             arg_text = " ".join(f"{key} {value}" for key, value in args.items())
             examples.append((f"use {tool.name} {arg_text} for: {text}", tool.name, args))
 
@@ -144,6 +202,10 @@ class BasePredictor(ABC):
 
     def update(self, subtask: str, tool_name: str, args: Optional[dict[str, Any]] = None) -> None:
         pass
+
+    def update_calls(self, subtask: str, calls: list[tuple[str, dict[str, Any]]]) -> None:
+        for tool_name, args in calls:
+            self.update(subtask, tool_name, args)
 
     def predict_call(self, subtask: str) -> ToolPrediction:
         return ToolPrediction(self.predict(subtask), {})
@@ -174,8 +236,8 @@ class NaiveBayesPredictor(BasePredictor):
         self._feature_counts: dict[str, Counter[str]] = defaultdict(Counter)
         self._feature_totals: Counter[str] = Counter()
         self._vocabulary: set[str] = set()
-        self._arg_memory: dict[str, Counter[str]] = defaultdict(Counter)
-        self._pending_updates: list[tuple[str, str, dict[str, Any]]] = []
+        self._call_memory: dict[str, tuple[PredictedToolCall, ...]] = {}
+        self._pending_updates: list[tuple[str, tuple[PredictedToolCall, ...]]] = []
         self._is_trained = False
 
         data = training_data
@@ -207,17 +269,19 @@ class NaiveBayesPredictor(BasePredictor):
         self._feature_counts.clear()
         self._feature_totals.clear()
         self._vocabulary.clear()
-        self._arg_memory.clear()
+        self._call_memory.clear()
 
-        for subtask, tool_name, args in training_data:
-            label = _action_name(tool_name)
+        for item in training_data:
+            subtask, calls = _normalize_training_item(item)
+            if not calls:
+                continue
+            label = _freeze_calls(calls)
             feats = _features(_first_line(subtask))
             self._class_doc_counts[label] += 1
             self._feature_counts[label].update(feats)
             self._feature_totals[label] += len(feats)
             self._vocabulary.update(feats)
-            if args:
-                self._arg_memory[label].update([_freeze_args(args)])
+            self._call_memory[label] = calls
 
         self._is_trained = True
         logger.info(
@@ -232,8 +296,9 @@ class NaiveBayesPredictor(BasePredictor):
             return
         existing = []
         for label, count in self._class_doc_counts.items():
+            calls = self._call_memory.get(label) or _unfreeze_calls(label)
             for _ in range(count):
-                existing.append((label, label, {}))
+                existing.append((label, calls))
         self.fit([*existing, *self._pending_updates])
         self._pending_updates.clear()
 
@@ -251,10 +316,11 @@ class NaiveBayesPredictor(BasePredictor):
 
         best_label = ""
         best_score = -math.inf
-        candidate_labels = {_action_name(tool) for tool in self._candidate_tools} if self._candidate_tools else None
+        candidate_actions = {_action_name(tool) for tool in self._candidate_tools} if self._candidate_tools else None
         labels = [
             label for label in self._class_doc_counts
-            if candidate_labels is None or label in candidate_labels
+            if candidate_actions is None
+            or all(_action_name(call.name) in candidate_actions for call in _unfreeze_calls(label))
         ] or list(self._class_doc_counts)
 
         for label in labels:
@@ -268,21 +334,34 @@ class NaiveBayesPredictor(BasePredictor):
                 best_label = label
                 best_score = score
 
-        tool = _canonicalize_tool(best_label, self._candidate_tools)
-        return ToolPrediction(tool, self._infer_args(best_label, subtask))
+        return self._prediction_from_label(best_label, subtask)
 
     def update(self, subtask: str, tool_name: str, args: Optional[dict[str, Any]] = None) -> None:
         if not tool_name:
             return
-        self._pending_updates.append((subtask, _action_name(tool_name), args or {}))
-        label = _action_name(tool_name)
+        calls = (PredictedToolCall(_action_name(tool_name), args or {}),)
+        self._pending_updates.append((subtask, calls))
+        label = _freeze_calls(calls)
         feats = _features(_first_line(subtask))
         self._class_doc_counts[label] += 1
         self._feature_counts[label].update(feats)
         self._feature_totals[label] += len(feats)
         self._vocabulary.update(feats)
-        if args:
-            self._arg_memory[label].update([_freeze_args(args)])
+        self._call_memory[label] = calls
+        self._is_trained = True
+
+    def update_calls(self, subtask: str, calls: list[tuple[str, dict[str, Any]]]) -> None:
+        normalized = tuple(PredictedToolCall(_action_name(name), args or {}) for name, args in calls if name)
+        if not normalized:
+            return
+        self._pending_updates.append((subtask, normalized))
+        label = _freeze_calls(normalized)
+        feats = _features(_first_line(subtask))
+        self._class_doc_counts[label] += 1
+        self._feature_counts[label].update(feats)
+        self._feature_totals[label] += len(feats)
+        self._vocabulary.update(feats)
+        self._call_memory[label] = normalized
         self._is_trained = True
 
     def predict_proba(self, subtask: str) -> dict[str, float]:
@@ -292,10 +371,11 @@ class NaiveBayesPredictor(BasePredictor):
         feats = _features(_first_line(subtask))
         total_docs = sum(self._class_doc_counts.values())
         vocab_size = max(len(self._vocabulary), 1)
-        candidate_labels = {_action_name(tool) for tool in self._candidate_tools} if self._candidate_tools else None
+        candidate_actions = {_action_name(tool) for tool in self._candidate_tools} if self._candidate_tools else None
         labels = [
             label for label in self._class_doc_counts
-            if candidate_labels is None or label in candidate_labels
+            if candidate_actions is None
+            or all(_action_name(call.name) in candidate_actions for call in _unfreeze_calls(label))
         ] or list(self._class_doc_counts)
 
         for label in labels:
@@ -312,13 +392,18 @@ class NaiveBayesPredictor(BasePredictor):
         total = sum(exp_scores.values()) or 1.0
         return dict(sorted(((label, score / total) for label, score in exp_scores.items()), key=lambda x: x[1], reverse=True))
 
-    def _infer_args(self, label: str, subtask: str) -> dict[str, Any]:
-        text = _first_line(subtask)
-        memory = self._arg_memory.get(label)
-        if memory and len(memory) == 1:
-            return _unfreeze_args(next(iter(memory)))
-
-        return _heuristic_args(label, text)
+    def _prediction_from_label(self, label: str, subtask: str) -> ToolPrediction:
+        calls = self._call_memory.get(label) or _unfreeze_calls(label)
+        if not calls:
+            return ToolPrediction("", {})
+        canonical = tuple(
+            PredictedToolCall(
+                _canonicalize_tool(call.name, self._candidate_tools),
+                call.args or _heuristic_args(call.name, subtask),
+            )
+            for call in calls
+        )
+        return ToolPrediction(calls=canonical)
 
 
 class HabitPredictor(BasePredictor):
@@ -333,14 +418,12 @@ class HabitPredictor(BasePredictor):
         self._cache_size = cache_size
         self._candidate_tools: list[str] = []
         self._cache: OrderedDict[str, Counter[str]] = OrderedDict()
-        self._args: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
-        self._recent_tools: list[str] = []
+        self._recent_labels: list[str] = []
 
         if training_data:
             for item in training_data:
-                subtask, tool_name = item[0], item[1]
-                args = item[2] if len(item) > 2 else {}
-                self.update(subtask, tool_name, args)
+                subtask, calls = _normalize_training_item(item)
+                self._update_calls(subtask, calls)
 
     def set_candidate_tools(self, tools: list[str]) -> None:
         self._candidate_tools = tools
@@ -350,45 +433,57 @@ class HabitPredictor(BasePredictor):
 
     def predict_call(self, subtask: str) -> ToolPrediction:
         sig = _make_signature(subtask)
+        candidate_actions = {_action_name(tool) for tool in self._candidate_tools} if self._candidate_tools else None
         if sig not in self._cache:
-            candidate_actions = {_action_name(tool) for tool in self._candidate_tools} if self._candidate_tools else None
-            for action in self._recent_tools:
-                if candidate_actions is None or action in candidate_actions:
-                    tool = _canonicalize_tool(action, self._candidate_tools)
-                    return ToolPrediction(tool, _heuristic_args(action, subtask))
+            for label in self._recent_labels:
+                calls = _unfreeze_calls(label)
+                if candidate_actions is None or all(_action_name(call.name) in candidate_actions for call in calls):
+                    return self._prediction_from_calls(calls, subtask)
             return ToolPrediction("", {})
 
         self._cache.move_to_end(sig)
-        tool_action = self._cache[sig].most_common(1)[0][0]
-        tool = _canonicalize_tool(tool_action, self._candidate_tools)
-        arg_counts = self._args.get((sig, tool_action), Counter())
-        args = _unfreeze_args(arg_counts.most_common(1)[0][0]) if arg_counts else _heuristic_args(tool_action, subtask)
-        return ToolPrediction(tool, args)
+        for label, _count in self._cache[sig].most_common():
+            calls = _unfreeze_calls(label)
+            if candidate_actions is None or all(_action_name(call.name) in candidate_actions for call in calls):
+                return self._prediction_from_calls(calls, subtask)
+        return ToolPrediction("", {})
 
     def update(self, subtask: str, tool_name: str, args: Optional[dict[str, Any]] = None) -> None:
         if not tool_name:
             return
+        self._update_calls(subtask, (PredictedToolCall(tool_name, args or {}),))
+
+    def update_calls(self, subtask: str, calls: list[tuple[str, dict[str, Any]]]) -> None:
+        self._update_calls(subtask, tuple(PredictedToolCall(name, args or {}) for name, args in calls if name))
+
+    def _update_calls(self, subtask: str, calls: tuple[PredictedToolCall, ...]) -> None:
+        if not calls:
+            return
 
         sig = _make_signature(subtask)
-        action = _action_name(tool_name)
+        label = _freeze_calls(calls)
 
         if sig in self._cache:
             self._cache.move_to_end(sig)
         else:
             self._cache[sig] = Counter()
             if len(self._cache) > self._cache_size:
-                evicted, _ = self._cache.popitem(last=False)
-                for key in list(self._args):
-                    if key[0] == evicted:
-                        del self._args[key]
-        self._cache[sig][action] += 1
-        if action in self._recent_tools:
-            self._recent_tools.remove(action)
-        self._recent_tools.insert(0, action)
-        if len(self._recent_tools) > self._cache_size:
-            self._recent_tools.pop()
-        if args:
-            self._args[(sig, action)].update([_freeze_args(args)])
+                self._cache.popitem(last=False)
+        self._cache[sig][label] += 1
+        if label in self._recent_labels:
+            self._recent_labels.remove(label)
+        self._recent_labels.insert(0, label)
+        if len(self._recent_labels) > self._cache_size:
+            self._recent_labels.pop()
+
+    def _prediction_from_calls(self, calls: tuple[PredictedToolCall, ...], subtask: str) -> ToolPrediction:
+        return ToolPrediction(calls=tuple(
+            PredictedToolCall(
+                _canonicalize_tool(call.name, self._candidate_tools),
+                call.args or _heuristic_args(call.name, subtask),
+            )
+            for call in calls
+        ))
 
 
 class SmallLLMPredictor(BasePredictor):
@@ -448,7 +543,17 @@ class SmallLLMPredictor(BasePredictor):
         if not scores:
             return ToolPrediction("", {})
         tool, _score = scores[0]
-        return ToolPrediction(tool, _heuristic_args(_action_name(tool), subtask))
+        action = _action_name(tool)
+        example_calls = self._closest_example_calls(subtask, action)
+        if example_calls:
+            return ToolPrediction(calls=tuple(
+                PredictedToolCall(
+                    _canonicalize_tool(call.name, self._candidate_tools),
+                    call.args or _heuristic_args(call.name, subtask),
+                )
+                for call in example_calls
+            ))
+        return ToolPrediction(tool, _heuristic_args(action, subtask))
 
     def _semantic_scores(self, subtask: str) -> list[tuple[str, float]]:
         text_feats = Counter(_features(_first_line(subtask)))
@@ -460,8 +565,9 @@ class SmallLLMPredictor(BasePredictor):
             action = _action_name(tool)
             label_feats = Counter(_features(action))
             score = _cosine(text_feats, label_feats) * 2.0
-            for example_text, example_tool, _args in self._examples:
-                if _action_name(example_tool).lower() != action.lower():
+            for item in self._examples:
+                example_text, calls = _normalize_training_item(item)
+                if not calls or _action_name(calls[0].name).lower() != action.lower():
                     continue
                 score = max(score, _cosine(text_feats, Counter(_features(example_text))))
             aliases = _TOOL_ALIASES.get(action, ())
@@ -470,6 +576,20 @@ class SmallLLMPredictor(BasePredictor):
             scores[tool] = score
 
         return sorted(scores.items(), key=lambda item: item[1], reverse=True)
+
+    def _closest_example_calls(self, subtask: str, first_action: str) -> tuple[PredictedToolCall, ...]:
+        text_feats = Counter(_features(_first_line(subtask)))
+        best_score = 0.0
+        best_calls: tuple[PredictedToolCall, ...] = ()
+        for item in self._examples:
+            example_text, calls = _normalize_training_item(item)
+            if not calls or _action_name(calls[0].name).lower() != first_action.lower():
+                continue
+            score = _cosine(text_feats, Counter(_features(example_text)))
+            if score > best_score:
+                best_score = score
+                best_calls = calls
+        return best_calls
 
     def _load_pipeline(self):
         try:
