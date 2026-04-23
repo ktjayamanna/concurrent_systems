@@ -25,7 +25,6 @@
         "vscode": {
             "extensions": [
                 "ms-vscode.cpptools",
-                "augment.vscode-augment",
                 "pomdtr.excalidraw-editor",
                 "ms-python.python",
                 "anthropic.claude-code",

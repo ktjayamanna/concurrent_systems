@@ -2,6 +2,7 @@ augment-kv-store
 */data/*
 opaca-core
 opaca-llm-benchmark-containers
+.claude/
 .devcontainer/.env
 *.env
 notebooks
