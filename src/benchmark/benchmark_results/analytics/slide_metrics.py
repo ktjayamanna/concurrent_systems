@@ -280,10 +280,12 @@ def main():
     habit = HabitPredictor(cache_size=HABIT_CACHE_SIZE)
     naive_bayes = NaiveBayesPredictor(training_data=training_rows(train, add_label_text=True))
     small_llm = SmallLLMPredictor(training_data=[])
+    few_shot_small_llm = SmallLLMPredictor(training_data=training_rows(train), use_transformers=False)
 
     habit_metrics = evaluate_predictor(habit, labeled, candidates, online=True)
     naive_bayes_metrics = evaluate_predictor(naive_bayes, test, candidates)
     small_llm_metrics = evaluate_predictor(small_llm, labeled, candidates)
+    few_shot_small_llm_metrics = evaluate_predictor(few_shot_small_llm, test, candidates)
 
     metrics = {
         "methodology": {
@@ -298,6 +300,8 @@ def main():
             "naive_bayes_complex_test_prompts": sum(1 for split, _question in test if split == "complex"),
             "habit_eval_prompts": len(labeled),
             "small_llm_eval_prompts": len(labeled),
+            "few_shot_small_llm_train_prompts": len(train),
+            "few_shot_small_llm_test_prompts": len(test),
             "candidate_scope": "worker-agent/tool-family candidate set, matching SAGE orchestration after agent routing",
             "label": "full expected benchmark tool-call sequence",
             "habit_protocol": "online over the full benchmark with an empty initial cache",
@@ -305,6 +309,7 @@ def main():
             if getattr(small_llm, "_pipeline", None) is not None
             else "local_semantic_scorer",
             "small_llm_protocol": "zero-shot/local semantic scorer over the full benchmark; no supervised prompt training examples",
+            "few_shot_small_llm_protocol": "local semantic scorer with train-split examples as few-shot/retrieval demonstrations; evaluated on held-out split",
         },
         "timing": timing,
         "sage_openai_tool_selection_runtime_ms": sage_tool_selection_ms,
@@ -312,6 +317,7 @@ def main():
             f"habit_k{HABIT_CACHE_SIZE}": habit_metrics,
             "naive_bayes": naive_bayes_metrics,
             "small_llm": small_llm_metrics,
+            "few_shot_small_llm": few_shot_small_llm_metrics,
         },
     }
     metrics["real_savings_from_holdout"] = {
@@ -322,7 +328,7 @@ def main():
         "latency": "100% correct prediction saves about 77ms/simple and 229ms/complex, or 2.5% and 3.2% of the measured critical path.",
         "ml": (
             "Full-sequence accuracy is reported with predictor-appropriate protocols: Naive Bayes uses a held-out split, "
-            "while Habit and SmallLLM are evaluated over the full benchmark."
+            "SmallLLM few-shot uses the same held-out split, while Habit and zero-shot SmallLLM are evaluated over the full benchmark."
         ),
         "safety": "Financially costly tools are blocked before OPACA invocation; non-costly state changes can still be speculated under the current policy.",
     }
@@ -342,15 +348,16 @@ def main():
 
 def plot_predictors(metrics):
     habit_key = f"habit_k{HABIT_CACHE_SIZE}"
-    names = [f"Habit\nk={HABIT_CACHE_SIZE}", "Naive\nBayes", "SmallLLM"]
+    names = [f"Habit\nk={HABIT_CACHE_SIZE}", "Naive\nBayes", "SmallLLM\nzero-shot", "SmallLLM\nfew-shot"]
     values = [
         metrics[habit_key]["hit_rate"] * 100,
         metrics["naive_bayes"]["hit_rate"] * 100,
         metrics["small_llm"]["hit_rate"] * 100,
+        metrics["few_shot_small_llm"]["hit_rate"] * 100,
     ]
     x = np.arange(len(names))
     fig, ax = plt.subplots(figsize=(8, 5))
-    bars = ax.bar(x, values, color=["#4a90d9", "#e05c5c", "#4caf50"], alpha=0.9)
+    bars = ax.bar(x, values, color=["#4a90d9", "#e05c5c", "#4caf50", "#8b5cf6"], alpha=0.9)
     ax.axhline(50, color="#555", linestyle=":", linewidth=1.4, label="50% target")
     ax.set_ylim(0, 100)
     ax.set_ylabel("Tool-sequence accuracy (%)")
@@ -382,8 +389,8 @@ def plot_accuracy_by_query_type(metrics):
     savings = metrics["real_savings_from_holdout"]
     methodology = metrics["methodology"]
     habit_key = f"habit_k{HABIT_CACHE_SIZE}"
-    names = [f"Habit k={HABIT_CACHE_SIZE}", "Naive Bayes", "SmallLLM option"]
-    keys = [habit_key, "naive_bayes", "small_llm"]
+    names = [f"Habit k={HABIT_CACHE_SIZE}", "Naive Bayes", "SmallLLM zero-shot", "SmallLLM few-shot"]
+    keys = [habit_key, "naive_bayes", "small_llm", "few_shot_small_llm"]
     series = [
         (
             "Overall",
@@ -429,8 +436,9 @@ def plot_accuracy_by_query_type(metrics):
     ax.set_ylabel("Tool-sequence accuracy (%)")
     ax.set_title(
         "Predictor Accuracy by Query Type\n"
-        f"NB: {methodology['naive_bayes_train_prompts']} train / {methodology['naive_bayes_test_prompts']} held-out; "
-        f"Habit + SmallLLM: full benchmark n={methodology['total_prompts']}",
+        f"NB + few-shot: {methodology['naive_bayes_train_prompts']} train / {methodology['naive_bayes_test_prompts']} held-out "
+        f"(simple {methodology['naive_bayes_simple_test_prompts']}, complex {methodology['naive_bayes_complex_test_prompts']}); "
+        f"Habit + zero-shot: full benchmark n={methodology['total_prompts']}",
         fontsize=14,
         fontweight="bold",
     )
@@ -447,20 +455,28 @@ def plot_predictor_runtime(metrics):
     accuracy = metrics["predictor_holdout_accuracy"]
     sage_runtime = metrics["sage_openai_tool_selection_runtime_ms"]
     habit_key = f"habit_k{HABIT_CACHE_SIZE}"
-    names = [f"SAGE++:\nHabit k={HABIT_CACHE_SIZE}", "SAGE++:\nNaive Bayes", "SAGE++:\nSmallLLM", "SAGE OpenAI"]
+    names = [
+        f"SAGE++:\nHabit k={HABIT_CACHE_SIZE}",
+        "SAGE++:\nNaive Bayes",
+        "SAGE++:\nSmallLLM zero-shot",
+        "SAGE++:\nSmallLLM few-shot",
+        "SAGE OpenAI",
+    ]
     means = [
         accuracy[habit_key]["predictor_runtime_ms"]["mean"],
         accuracy["naive_bayes"]["predictor_runtime_ms"]["mean"],
         accuracy["small_llm"]["predictor_runtime_ms"]["mean"],
+        accuracy["few_shot_small_llm"]["predictor_runtime_ms"]["mean"],
         sage_runtime["mean"],
     ]
     p95s = [
         accuracy[habit_key]["predictor_runtime_ms"]["p95"],
         accuracy["naive_bayes"]["predictor_runtime_ms"]["p95"],
         accuracy["small_llm"]["predictor_runtime_ms"]["p95"],
+        accuracy["few_shot_small_llm"]["predictor_runtime_ms"]["p95"],
         sage_runtime["p95"],
     ]
-    colors = ["#2563eb", "#dc2626", "#16a34a", "#111827"]
+    colors = ["#2563eb", "#dc2626", "#16a34a", "#8b5cf6", "#111827"]
     x = np.arange(len(names))
     fig, ax = plt.subplots(figsize=(10, 5.8))
     bars = ax.bar(x, means, color=colors, alpha=0.9)

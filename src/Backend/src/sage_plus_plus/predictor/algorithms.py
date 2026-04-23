@@ -494,11 +494,12 @@ class SmallLLMPredictor(BasePredictor):
         candidate_tools: Optional[list[str]] = None,
         model_name: str = _DEFAULT_MODEL,
         training_data: Optional[list[tuple[str, str] | tuple[str, str, dict[str, Any]]]] = None,
+        use_transformers: bool = True,
     ) -> None:
         self._model_name = model_name
         self._candidate_tools: list[str] = candidate_tools or []
         self._pipeline = None
-        self._transformers_unavailable = False
+        self._transformers_unavailable = not use_transformers
         self._examples = training_data if training_data is not None else load_benchmark_training_data()
 
     def set_candidate_tools(self, tools: list[str]) -> None:
