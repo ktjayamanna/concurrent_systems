@@ -2,16 +2,28 @@
 
 ## Setup
 
-**Clone the repo**
 ```bash
-git clone git@github.com:ktjayamanna/concurrent_systems.git
-cd concurrent_systems
+git clone git@github.com:ktjayamanna/speculative_threading_for_low_latency_agentic_workflows.git
+cd speculative_threading_for_low_latency_agentic_workflows
 ```
 
-**Build the dev container**
+**Create required `.env` files before building:**
 
-Make sure you have created .env file at .devcontainer/.env. Then run,
+`.devcontainer/.env` — needed by the dev container:
+```
+OPENAI_API_KEY=sk-...        # required
+ANTHROPIC_API_KEY=           # optional
+GEMINI_API_KEY=              # optional
+MISTRAL_API_KEY=             # optional
+```
 
+`src/benchmark/.env` — needed by the benchmark runner:
+```
+OPENAI_API_KEY=sk-...        # required (used as judge LLM)
+OPACA_URL=                   # auto-set by run.py; leave blank
+```
+
+**Build and enter the dev container:**
 ```bash
 docker build -t concurrent_systems_dev .
 docker run -it --rm -v $(pwd):/code concurrent_systems_dev bash
